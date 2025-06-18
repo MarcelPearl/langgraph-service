@@ -1,0 +1,59 @@
+# Byte-compiled / cache files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environment
+venv/
+.env/
+.venv/
+
+# macOS system files
+.DS_Store
+
+# VSCode settings
+.vscode/
+
+# PyCharm settings
+.idea/
+
+# Environment variables
+*.env
+
+# Logs
+*.log
+
+# Uvicorn reload artifacts
+*.reload
+
+# Coverage & test output
+htmlcov/
+.coverage
+coverage.xml
+.pytest_cache/
+nosetests.xml
+test-results.xml
+.tox/
+
+# mypy
+.mypy_cache/
+
+# Pydantic cache
+__pydantic_cache__/
+
+# pip
+pip-log.txt
+
+# Poetry
+poetry.lock
+
+# Docker
+*.pid
+*.sock
+
+# Build
+build/
+dist/
+*.egg-info/
