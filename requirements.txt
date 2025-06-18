@@ -11,8 +11,6 @@ starlette==0.46.2
 typing-inspection==0.4.1
 typing_extensions==4.14.0
 uvicorn==0.34.3
-pydantic-settings==2.1.0+   
-sqlalchemy[asyncio]==2.0.0+ 
-asyncpg==0.29.0+       
-alembic==1.13.0+       
-uvloop==0.19.0+ 
+pydantic-settings==2.2.1  
+sqlalchemy[asyncio]==2.0.30 
+alembic==1.13.1       

@@ -9,3 +9,9 @@ Dont forget to:
 ```bash
 pip freeze > requirements.txt
 ```
+
+
+python3.11 supported
+```bash
+python3.11 -m venv venv
+```
