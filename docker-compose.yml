@@ -6,11 +6,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: postgresql+asyncpg://workflow_user:workflow_pass@postgres:5432/workflow_db
+      DATABASE_URL: postgresql+asyncpg://postgres:vishwas1660@db.nfegitlbxqxsnbzxiteq.supabase.co:5432/postgres
       PYTHONUNBUFFERED: 1
-    depends_on:
-      postgres:
-        condition: service_healthy
     volumes:
       - ./app:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
