@@ -1,4 +1,3 @@
-
 from typing import Dict, Any, Optional, List
 import asyncio
 import aiohttp
@@ -38,11 +37,16 @@ class HuggingFaceAPI:
         self.rate_limiter = HuggingFaceRateLimiter()
         self.base_url = settings.HUGGINGFACE_INFERENCE_URL
         self.headers = {
-            "Content-Type": "application/json"
+            "Content-Type": "application/json",
+            "User-Agent": "FastAPI-HF-Client/1.0"
         }
 
+        # Only add auth header if API key is available
         if settings.HUGGINGFACE_API_KEY:
             self.headers["Authorization"] = f"Bearer {settings.HUGGINGFACE_API_KEY}"
+            logger.info("Using authenticated Hugging Face API")
+        else:
+            logger.info("Using free tier Hugging Face API (no authentication)")
 
     async def generate_text(
             self,
@@ -57,15 +61,17 @@ class HuggingFaceAPI:
         if parameters is None:
             parameters = {}
 
+        # For free tier, use simpler parameters
+        max_tokens = parameters.get("max_tokens", 100)  # Reduced default
+
         payload = {
             "inputs": prompt,
             "parameters": {
-                "max_new_tokens": parameters.get("max_tokens", 500),
+                "max_new_tokens": min(max_tokens, 250),  # Limit for free tier
                 "temperature": parameters.get("temperature", 0.7),
                 "top_p": parameters.get("top_p", 0.9),
                 "do_sample": parameters.get("do_sample", True),
                 "return_full_text": parameters.get("return_full_text", False),
-                **parameters
             },
             "options": {
                 "wait_for_model": True,
@@ -73,20 +79,41 @@ class HuggingFaceAPI:
             }
         }
 
+        # Add additional parameters carefully for free tier
+        if settings.HUGGINGFACE_API_KEY:
+            # Authenticated users can use more parameters
+            payload["parameters"].update({k: v for k, v in parameters.items()
+                                          if k not in ["max_tokens", "temperature", "top_p", "do_sample",
+                                                       "return_full_text", "use_cache"]})
+
         url = f"{self.base_url}/{model_name}"
 
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                        url,
-                        headers=self.headers,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=settings.AI_REQUEST_TIMEOUT)
-                ) as response:
+            timeout = aiohttp.ClientTimeout(total=settings.AI_REQUEST_TIMEOUT)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=self.headers, json=payload) as response:
 
                     if response.status == 200:
                         result = await response.json()
                         return self._process_response(result, model_name)
+
+                    elif response.status == 401:
+                        # Handle unauthorized - might be API key issue or rate limit
+                        error_data = await response.text()
+                        logger.warning(f"Unauthorized access to {model_name}: {error_data}")
+
+                        if settings.HUGGINGFACE_API_KEY:
+                            raise Exception(f"Invalid API key for Hugging Face")
+                        else:
+                            # Try without auth headers for free tier
+                            headers_no_auth = {k: v for k, v in self.headers.items() if k != "Authorization"}
+                            async with session.post(url, headers=headers_no_auth, json=payload) as retry_response:
+                                if retry_response.status == 200:
+                                    result = await retry_response.json()
+                                    return self._process_response(result, model_name)
+                                else:
+                                    error_text = await retry_response.text()
+                                    raise Exception(f"Free tier access failed: {error_text}")
 
                     elif response.status == 503:
                         error_data = await response.json()
@@ -94,24 +121,27 @@ class HuggingFaceAPI:
                         logger.warning(f"Model {model_name} is loading, estimated time: {estimated_time}s")
 
                         if estimated_time < 60:  # Wait up to 1 minute
-                            await asyncio.sleep(estimated_time + 5)
+                            await asyncio.sleep(min(estimated_time + 5, 30))  # Cap wait time
                             return await self.generate_text(model_name, prompt, parameters)
                         else:
                             raise Exception(f"Model loading time too long: {estimated_time}s")
 
                     elif response.status == 429:
                         logger.warning("Rate limited by Hugging Face API")
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(10)  # Wait longer for rate limits
                         raise Exception("Rate limited - try again later")
 
                     else:
                         error_text = await response.text()
                         logger.error(f"HF API error {response.status}: {error_text}")
-                        raise Exception(f"Hugging Face API error: {response.status}")
+                        raise Exception(f"Hugging Face API error: {response.status} - {error_text}")
 
         except asyncio.TimeoutError:
             logger.error(f"Timeout calling Hugging Face model: {model_name}")
             raise Exception("Request timeout")
+        except aiohttp.ClientError as e:
+            logger.error(f"Client error calling Hugging Face API: {e}")
+            raise Exception(f"Connection error: {str(e)}")
         except Exception as e:
             logger.error(f"Error calling Hugging Face API: {e}")
             raise
@@ -127,11 +157,19 @@ class HuggingFaceAPI:
                 "provider": "huggingface"
             }
         elif isinstance(response, dict):
-            return {
-                "result": response,
-                "model": model_name,
-                "provider": "huggingface"
-            }
+            # Handle different response formats
+            if "generated_text" in response:
+                return {
+                    "text": response["generated_text"],
+                    "model": model_name,
+                    "provider": "huggingface"
+                }
+            else:
+                return {
+                    "text": str(response),
+                    "model": model_name,
+                    "provider": "huggingface"
+                }
         else:
             logger.warning(f"Unexpected response format from {model_name}: {response}")
             return {
@@ -144,10 +182,11 @@ class HuggingFaceAPI:
         """Get information about a Hugging Face model"""
 
         url = f"https://huggingface.co/api/models/{model_name}"
+        headers = {"User-Agent": "FastAPI-HF-Client/1.0"}
 
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+                async with session.get(url, headers=headers) as response:
                     if response.status == 200:
                         return await response.json()
                     else:
@@ -170,9 +209,11 @@ class HuggingFaceAPI:
         if task:
             params["pipeline_tag"] = task
 
+        headers = {"User-Agent": "FastAPI-HF-Client/1.0"}
+
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params) as response:
+                async with session.get(url, params=params, headers=headers) as response:
                     if response.status == 200:
                         models = await response.json()
                         return [

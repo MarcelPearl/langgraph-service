@@ -1,4 +1,3 @@
-
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
@@ -11,7 +10,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/workflows", tags=["workflows"])
+# Remove the prefix here since it's added in main.py
+router = APIRouter(tags=["workflows"])
 
 
 @router.post("/", response_model=WorkflowResponse)
@@ -21,11 +21,14 @@ async def create_workflow(
 ):
     """Create a new workflow"""
     try:
+        from datetime import datetime
+
         workflow = Workflow(
             name=workflow_data.name,
             description=workflow_data.description,
             definition=workflow_data.definition,
-            ai_config=workflow_data.ai_config or {}
+            ai_config=workflow_data.ai_config or {},
+            created_at=datetime.utcnow()  # Explicitly set created_at
         )
 
         db.add(workflow)

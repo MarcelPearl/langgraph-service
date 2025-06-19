@@ -3,6 +3,7 @@ from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 import uuid
+from datetime import datetime
 from app.core.database import Base
 
 class User(Base):
@@ -21,8 +22,9 @@ class Workflow(Base):
     version = Column(Integer, default=1, nullable=False)
     is_active = Column(Boolean, default=True, nullable=False)
 
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    # Fix: Use default instead of server_default for better compatibility
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=datetime.utcnow, nullable=True)
     created_by = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     ai_config = Column(JSONB, default={}, nullable=False)  # Model preferences, etc.
@@ -45,7 +47,7 @@ class WorkflowExecution(Base):
 
     started_at = Column(DateTime(timezone=True), nullable=True)
     completed_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     current_step = Column(String(255), nullable=True)
     steps_completed = Column(Integer, default=0, nullable=False)
@@ -68,8 +70,7 @@ class ExecutionCheckpoint(Base):
     state_data = Column(JSONB, nullable=False)
     checkpoint_metadata = Column(JSONB, default={}, nullable=False)
 
-
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     execution = relationship("WorkflowExecution", back_populates="checkpoints")
 
@@ -86,5 +87,5 @@ class AITool(Base):
     schema_definition = Column(JSONB, nullable=False)
 
     is_active = Column(Boolean, default=True, nullable=False)
-    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
-    updated_at = Column(DateTime(timezone=True), onupdate=func.now(), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), onupdate=datetime.utcnow, nullable=True)

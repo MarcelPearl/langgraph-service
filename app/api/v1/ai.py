@@ -1,4 +1,4 @@
-import datetime
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from sqlalchemy import select, update
@@ -14,8 +14,6 @@ from app.schemas.ai import (
     HuggingFaceModelInfo, AvailableProvidersResponse
 )
 import logging
-
-from app.services.langgraph.workflow import BasicWorkflowEngine
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +56,7 @@ async def generate_ai_response(request: AIModelRequest):
                 response=result["text"],
                 model=request.model,
                 provider="huggingface",
-                metadata={"usage": result}
+                response_metadata={"usage": result}
             )
         else:
             model = model_factory.get_model(
@@ -156,61 +154,15 @@ async def test_free_models():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/", response_model=List[WorkflowResponse])
-async def list_workflows(
-        skip: int = 0,
-        limit: int = 100,
-        db: AsyncSession = Depends(get_db)
-):
-    """List all workflows"""
-    try:
-        result = await db.execute(
-            select(Workflow)
-            .where(Workflow.is_active == True)
-            .offset(skip)
-            .limit(limit)
-            .order_by(Workflow.created_at.desc())
-        )
-        workflows = result.scalars().all()
-        return workflows
-
-    except Exception as e:
-        logger.error(f"Error listing workflows: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{workflow_id}", response_model=WorkflowResponse)
-async def get_workflow(
-        workflow_id: str,
-        db: AsyncSession = Depends(get_db)
-):
-    """Get workflow by ID"""
-    try:
-        result = await db.execute(
-            select(Workflow).where(Workflow.id == workflow_id)
-        )
-        workflow = result.scalar_one_or_none()
-
-        if not workflow:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-
-        return workflow
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting workflow: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.post("/{workflow_id}/execute", response_model=WorkflowExecutionResponse)
+# Workflow execution endpoints - these should probably be in a separate workflow execution router
+@router.post("/workflows/{workflow_id}/execute", response_model=WorkflowExecutionResponse)
 async def execute_workflow(
         workflow_id: str,
         execution_data: WorkflowExecutionCreate,
         background_tasks: BackgroundTasks,
         db: AsyncSession = Depends(get_db)
 ):
-    """Execute a workflow"""
+    """Execute a workflow with AI"""
     try:
         # Get workflow
         result = await db.execute(
@@ -262,6 +214,9 @@ async def execute_workflow_background(
 ):
     """Background task for workflow execution"""
     try:
+        # Import here to avoid circular imports
+        from app.services.langgraph.workflow import BasicWorkflowEngine
+
         # Update execution status
         await db.execute(
             update(WorkflowExecution)
@@ -322,7 +277,7 @@ async def execute_workflow_background(
         await db.commit()
 
 
-@router.get("/{workflow_id}/executions", response_model=List[WorkflowExecutionResponse])
+@router.get("/workflows/{workflow_id}/executions", response_model=List[WorkflowExecutionResponse])
 async def list_workflow_executions(
         workflow_id: str,
         skip: int = 0,
@@ -369,3 +324,4 @@ async def get_execution(
     except Exception as e:
         logger.error(f"Error getting execution: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+

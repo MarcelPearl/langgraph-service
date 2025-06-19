@@ -145,24 +145,19 @@ class AIModelFactory:
         config = {
             "endpoint_url": endpoint_url,
             "task": kwargs.get("task", "text-generation"),
-            "model_kwargs": {
-                "temperature": common_config.get("temperature", 0.7),
-                "max_new_tokens": kwargs.get("max_tokens", settings.HUGGINGFACE_MAX_NEW_TOKENS),
-                "return_full_text": kwargs.get("return_full_text", False),
-                "do_sample": kwargs.get("do_sample", True),
-            }
+            "temperature": common_config.get("temperature", 0.7),
+            "max_new_tokens": kwargs.get("max_tokens", settings.HUGGINGFACE_MAX_NEW_TOKENS),
+            "return_full_text": kwargs.get("return_full_text", False),
+            "do_sample": kwargs.get("do_sample", True)
         }
-
 
         if settings.HUGGINGFACE_API_KEY:
             config["huggingfacehub_api_token"] = settings.HUGGINGFACE_API_KEY
 
-        if "top_p" in kwargs:
-            config["model_kwargs"]["top_p"] = kwargs["top_p"]
-        if "top_k" in kwargs:
-            config["model_kwargs"]["top_k"] = kwargs["top_k"]
-        if "repetition_penalty" in kwargs:
-            config["model_kwargs"]["repetition_penalty"] = kwargs["repetition_penalty"]
+        # Optional generation parameters (must also be flattened)
+        for optional_param in ["top_p", "top_k", "repetition_penalty"]:
+            if optional_param in kwargs:
+                config[optional_param] = kwargs[optional_param]
 
         return HuggingFaceEndpoint(**config)
 
