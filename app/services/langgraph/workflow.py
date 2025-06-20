@@ -11,11 +11,18 @@ import asyncio
 import json
 from datetime import datetime
 
+# Kafka integration
+from app.services.kafka.producer import event_producer
+from app.schemas.events import (
+    EventType, create_execution_event, create_node_event,
+    create_ai_request_event, create_tool_call_event
+)
+
 logger = logging.getLogger(__name__)
 
 
 class BasicWorkflowEngine:
-    """Basic workflow execution engine using LangGraph"""
+    """Basic workflow execution engine using LangGraph with Kafka event integration"""
 
     def __init__(self, db_session):
         self.db_session = db_session
@@ -63,11 +70,30 @@ class BasicWorkflowEngine:
 
         return compiled_workflow
 
+    async def _publish_event(self, event_payload):
+        """Safely publish event to Kafka"""
+        try:
+            await event_producer.publish_event(event_payload)
+        except Exception as e:
+            logger.error(f"Failed to publish event: {e}")
+            # Continue execution even if event publishing fails
+
     async def process_input_node(self, state: WorkflowState) -> WorkflowState:
         """Process initial input and setup workflow"""
         logger.info(f"Processing input for execution {state['execution_id']}")
 
         try:
+            # Publish node started event
+            await self._publish_event(
+                create_node_event(
+                    event_type=EventType.NODE_STARTED,
+                    execution_id=state['execution_id'],
+                    workflow_id=state['workflow_id'],
+                    node_id="process_input",
+                    node_type="input_processor"
+                )
+            )
+
             state = self.state_manager.update_state(state, {
                 "current_step": "process_input",
             })
@@ -79,18 +105,56 @@ class BasicWorkflowEngine:
 
             state["execution_metadata"]["input_processed_at"] = datetime.utcnow().isoformat()
 
+            # Publish node completed event
+            await self._publish_event(
+                create_node_event(
+                    event_type=EventType.NODE_COMPLETED,
+                    execution_id=state['execution_id'],
+                    workflow_id=state['workflow_id'],
+                    node_id="process_input",
+                    node_type="input_processor",
+                    output_data={"processed": True, "input_length": len(input_text)}
+                )
+            )
+
             logger.info(f"Input processed successfully for execution {state['execution_id']}")
             return state
 
         except Exception as e:
             logger.error(f"Error in process_input_node: {e}")
+
+            # Publish node failed event
+            await self._publish_event(
+                create_node_event(
+                    event_type=EventType.NODE_FAILED,
+                    execution_id=state['execution_id'],
+                    workflow_id=state['workflow_id'],
+                    node_id="process_input",
+                    node_type="input_processor",
+                    error_data={"error": str(e), "type": type(e).__name__}
+                )
+            )
+
             return self.state_manager.handle_error(state, e, "process_input")
 
     async def execute_ai_node(self, state: WorkflowState) -> WorkflowState:
         """Execute AI model with current context"""
         logger.info(f"Executing AI model for execution {state['execution_id']}")
 
+        start_time = datetime.utcnow()
+
         try:
+            # Publish AI request started event
+            await self._publish_event(
+                create_ai_request_event(
+                    event_type=EventType.AI_REQUEST_STARTED,
+                    execution_id=state['execution_id'],
+                    workflow_id=state['workflow_id'],
+                    ai_provider=state['ai_provider'],
+                    ai_model=state['ai_model']
+                )
+            )
+
             state = self.state_manager.update_state(state, {
                 "current_step": "execute_ai",
             })
@@ -104,9 +168,27 @@ class BasicWorkflowEngine:
 
             state = self.state_manager.add_message(state, response)
 
+            # Calculate execution metrics
+            end_time = datetime.utcnow()
+            execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
+            tokens_used = 0
             if hasattr(response, "usage_metadata"):
-                tokens = getattr(response.usage_metadata, "total_tokens", 0)
-                state["tokens_used"] += tokens
+                tokens_used = getattr(response.usage_metadata, "total_tokens", 0)
+                state["tokens_used"] += tokens_used
+
+            # Publish AI request completed event
+            await self._publish_event(
+                create_ai_request_event(
+                    event_type=EventType.AI_REQUEST_COMPLETED,
+                    execution_id=state['execution_id'],
+                    workflow_id=state['workflow_id'],
+                    ai_provider=state['ai_provider'],
+                    ai_model=state['ai_model'],
+                    total_tokens=tokens_used,
+                    response_time_ms=execution_time_ms
+                )
+            )
 
             if hasattr(response, "tool_calls") and response.tool_calls:
                 state["tool_calls"].extend([
@@ -124,6 +206,23 @@ class BasicWorkflowEngine:
 
         except Exception as e:
             logger.error(f"Error in execute_ai_node: {e}")
+
+            # Calculate execution time even on error
+            end_time = datetime.utcnow()
+            execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
+            # Publish AI request failed event
+            await self._publish_event(
+                create_ai_request_event(
+                    event_type=EventType.AI_REQUEST_FAILED,
+                    execution_id=state['execution_id'],
+                    workflow_id=state['workflow_id'],
+                    ai_provider=state['ai_provider'],
+                    ai_model=state['ai_model'],
+                    response_time_ms=execution_time_ms,
+                    error_data={"error": str(e), "type": type(e).__name__}
+                )
+            )
 
             if not self.state_manager.is_max_retries_reached(state):
                 state = self.state_manager.handle_error(state, e, "execute_ai")
@@ -192,10 +291,24 @@ class BasicWorkflowEngine:
 
             tool_messages = []
             for tool_call in last_message.tool_calls:
+                start_time = datetime.utcnow()
+
                 try:
                     tool_name = tool_call.get("name")
                     tool_args = tool_call.get("args", {})
                     tool_id = tool_call.get("id")
+
+                    # Publish tool call started event
+                    await self._publish_event(
+                        create_tool_call_event(
+                            event_type=EventType.TOOL_CALL_STARTED,
+                            execution_id=state['execution_id'],
+                            workflow_id=state['workflow_id'],
+                            tool_name=tool_name,
+                            tool_id=tool_id,
+                            tool_args=tool_args
+                        )
+                    )
 
                     tool = tool_registry.get_tool(tool_name)
                     if not tool:
@@ -206,12 +319,15 @@ class BasicWorkflowEngine:
                         else:
                             result = tool._run(**tool_args)
 
+                    # Calculate execution time
+                    end_time = datetime.utcnow()
+                    execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
                     tool_message = ToolMessage(
                         content=str(result),
                         tool_call_id=tool_id
                     )
                     tool_messages.append(tool_message)
-
 
                     state["tool_results"].append({
                         "tool_name": tool_name,
@@ -221,10 +337,41 @@ class BasicWorkflowEngine:
                         "timestamp": datetime.utcnow().isoformat()
                     })
 
+                    # Publish tool call completed event
+                    await self._publish_event(
+                        create_tool_call_event(
+                            event_type=EventType.TOOL_CALL_COMPLETED,
+                            execution_id=state['execution_id'],
+                            workflow_id=state['workflow_id'],
+                            tool_name=tool_name,
+                            tool_id=tool_id,
+                            tool_result=result,
+                            execution_time_ms=execution_time_ms
+                        )
+                    )
+
                     logger.info(f"Tool {tool_name} executed successfully")
 
                 except Exception as tool_error:
                     logger.error(f"Tool execution error for {tool_name}: {tool_error}")
+
+                    # Calculate execution time even on error
+                    end_time = datetime.utcnow()
+                    execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
+                    # Publish tool call failed event
+                    await self._publish_event(
+                        create_tool_call_event(
+                            event_type=EventType.TOOL_CALL_FAILED,
+                            execution_id=state['execution_id'],
+                            workflow_id=state['workflow_id'],
+                            tool_name=tool_name,
+                            tool_id=tool_call.get("id", "unknown"),
+                            execution_time_ms=execution_time_ms,
+                            error_data={"error": str(tool_error), "type": type(tool_error).__name__}
+                        )
+                    )
+
                     tool_message = ToolMessage(
                         content=f"Error executing tool: {str(tool_error)}",
                         tool_call_id=tool_call.get("id", "unknown")
@@ -299,10 +446,24 @@ class BasicWorkflowEngine:
             ai_config: Dict[str, Any],
             user_id: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Execute a complete workflow"""
+        """Execute a complete workflow with full event publishing"""
         logger.info(f"Starting workflow execution {execution_id}")
 
+        start_time = datetime.utcnow()
+
         try:
+            # Publish execution started event
+            await self._publish_event(
+                create_execution_event(
+                    event_type=EventType.EXECUTION_STARTED,
+                    execution_id=execution_id,
+                    workflow_id=workflow_id,
+                    execution_status="running",
+                    input_data=input_data,
+                    user_id=user_id
+                )
+            )
+
             workflow = await self.create_basic_workflow()
 
             initial_state = self.state_manager.create_initial_state(
@@ -322,6 +483,10 @@ class BasicWorkflowEngine:
 
             final_state = await workflow.ainvoke(initial_state, config=config)
 
+            # Calculate total execution time
+            end_time = datetime.utcnow()
+            execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
             result = {
                 "execution_id": execution_id,
                 "status": "completed" if not final_state.get("error_state") else "failed",
@@ -331,15 +496,55 @@ class BasicWorkflowEngine:
                     "steps_completed": final_state["step_count"],
                     "tokens_used": final_state["tokens_used"],
                     "tool_calls": len(final_state["tool_calls"]),
-                    "execution_time": final_state["last_updated"]
+                    "execution_time": final_state["last_updated"],
+                    "execution_time_ms": execution_time_ms
                 }
             }
+
+            # Publish execution completed/failed event
+            event_type = EventType.EXECUTION_COMPLETED if result[
+                                                              "status"] == "completed" else EventType.EXECUTION_FAILED
+
+            await self._publish_event(
+                create_execution_event(
+                    event_type=event_type,
+                    execution_id=execution_id,
+                    workflow_id=workflow_id,
+                    execution_status=result["status"],
+                    output_data=result.get("output"),
+                    error_data=result.get("error"),
+                    steps_completed=final_state["step_count"],
+                    tokens_used=final_state["tokens_used"],
+                    execution_time_ms=execution_time_ms
+                )
+            )
 
             logger.info(f"Workflow execution {execution_id} completed successfully")
             return result
 
         except Exception as e:
             logger.error(f"Workflow execution failed for {execution_id}: {e}")
+
+            # Calculate execution time even on error
+            end_time = datetime.utcnow()
+            execution_time_ms = int((end_time - start_time).total_seconds() * 1000)
+
+            # Publish execution failed event
+            await self._publish_event(
+                create_execution_event(
+                    event_type=EventType.EXECUTION_FAILED,
+                    execution_id=execution_id,
+                    workflow_id=workflow_id,
+                    execution_status="failed",
+                    error_data={
+                        "type": type(e).__name__,
+                        "message": str(e),
+                        "timestamp": datetime.utcnow().isoformat()
+                    },
+                    execution_time_ms=execution_time_ms
+                )
+            )
+
             return {
                 "execution_id": execution_id,
                 "status": "failed",
