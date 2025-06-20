@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 
 
 class Settings(BaseSettings):
@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     AI_CALLS_PER_MINUTE: int = 60
     AI_CALLS_PER_HOUR: int = 1000
 
+    LOCAL_MODEL_CACHE_DIR: str = "./models"
+    USE_LOCAL_MODELS: bool = True
+    PREFERRED_LOCAL_MODELS: List[str] = [
+        "microsoft/Phi-3-mini-4k-instruct",
+        "deepset/roberta-base-squad2"
+    ]
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         if not self.LANGGRAPH_CHECKPOINT_DB:

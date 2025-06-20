@@ -41,6 +41,7 @@ class AIModelFactory:
             raise
 
     @classmethod
+    @classmethod
     def _get_default_model(cls, provider: str) -> str:
         """Get the default model name for provider"""
         defaults = {
@@ -48,7 +49,7 @@ class AIModelFactory:
             "anthropic": settings.DEFAULT_ANTHROPIC_MODEL,
             "huggingface": settings.DEFAULT_HUGGINGFACE_MODEL
         }
-        return defaults.get(provider, "gpt-4")
+        return defaults.get(provider, "gpt-3.5-turbo")
 
     @classmethod
     def _create_model(
@@ -177,76 +178,38 @@ class AIModelFactory:
     def get_popular_huggingface_models(cls) -> Dict[str, Dict[str, Any]]:
         """Get a list of popular free Hugging Face models"""
         return {
-            "microsoft/DialoGPT-medium": {
-                "description": "Conversational AI model trained on Reddit discussions",
-                "type": "chat",
-                "task": "text-generation",
-                "free": True
-            },
-            "microsoft/DialoGPT-large": {
-                "description": "Large conversational AI model",
-                "type": "chat",
-                "task": "text-generation",
-                "free": True
-            },
-            "facebook/blenderbot-400M-distill": {
-                "description": "Open-domain chatbot",
-                "type": "chat",
-                "task": "text-generation",
-                "free": True
-            },
-
-            "gpt2": {
-                "description": "GPT-2 text generation model",
-                "type": "generation",
-                "task": "text-generation",
-                "free": True
-            },
-            "gpt2-medium": {
-                "description": "Medium-sized GPT-2 model",
-                "type": "generation",
-                "task": "text-generation",
-                "free": True
-            },
-            "distilgpt2": {
-                "description": "Lightweight version of GPT-2",
-                "type": "generation",
-                "task": "text-generation",
-                "free": True
-            },
-
-            "google/flan-t5-base": {
-                "description": "Instruction-following T5 model",
+            "microsoft/Phi-3-mini-4k-instruct": {
+                "description": "Small but powerful instruction-following model",
                 "type": "instruction",
-                "task": "text2text-generation",
-                "free": True
-            },
-            "google/flan-t5-large": {
-                "description": "Large instruction-following model",
-                "type": "instruction",
-                "task": "text2text-generation",
-                "free": True
-            },
-
-            "Salesforce/codegen-350M-multi": {
-                "description": "Code generation model",
-                "type": "code",
                 "task": "text-generation",
-                "free": True
+                "free": True,
+                "reliable": True,
+                "endpoint_type": "standard"
             },
-
-            "facebook/bart-large-cnn": {
-                "description": "Summarization model trained on CNN/DailyMail",
-                "type": "summarization",
-                "task": "summarization",
-                "free": True
+            "deepseek/deepseek-v3-0324": {
+                "description": "DeepSeek V3 model via Novita router",
+                "type": "chat",
+                "task": "text-generation",
+                "free": True,
+                "reliable": True,
+                "endpoint_type": "openai_compatible",
+                "custom_endpoint": "https://router.huggingface.co/novita/v3/openai/chat/completions"
             },
-
             "deepset/roberta-base-squad2": {
-                "description": "Question answering model",
+                "description": "Question answering model based on RoBERTa",
                 "type": "qa",
                 "task": "question-answering",
-                "free": True
+                "free": True,
+                "reliable": True,
+                "endpoint_type": "standard"
+            },
+            "microsoft/DialoGPT-medium": {
+                "description": "Conversational AI model (legacy)",
+                "type": "chat",
+                "task": "text-generation",
+                "free": True,
+                "reliable": True,
+                "endpoint_type": "standard"
             }
         }
 

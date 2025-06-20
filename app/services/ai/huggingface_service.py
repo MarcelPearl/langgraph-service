@@ -1,52 +1,65 @@
-from typing import Dict, Any, Optional, List
 import asyncio
 import aiohttp
 import time
-from app.core.config import settings
 import logging
+from typing import Dict, Any, Optional, List
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
 
-class HuggingFaceRateLimiter:
-    """Rate limiter for Hugging Face free tier"""
-
-    def __init__(self):
-        self.last_request_time = 0
-        self.request_count = 0
-        self.reset_time = 0
-
-    async def wait_if_needed(self):
-        """Wait if necessary to respect rate limits"""
-        current_time = time.time()
-
-        if not settings.HUGGINGFACE_API_KEY:
-            time_since_last = current_time - self.last_request_time
-            if time_since_last < settings.HUGGINGFACE_FREE_TIER_DELAY:
-                wait_time = settings.HUGGINGFACE_FREE_TIER_DELAY - time_since_last
-                logger.info(f"Rate limiting: waiting {wait_time:.2f} seconds")
-                await asyncio.sleep(wait_time)
-
-        self.last_request_time = time.time()
-
-
 class HuggingFaceAPI:
-    """Direct Hugging Face API client for advanced usage"""
+    """Enhanced HuggingFace API client with multiple endpoint support"""
 
     def __init__(self):
-        self.rate_limiter = HuggingFaceRateLimiter()
-        self.base_url = settings.HUGGINGFACE_INFERENCE_URL
-        self.headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "FastAPI-HF-Client/1.0"
+        self.base_url = "https://api-inference.huggingface.co/models"
+        self.last_request_time = 0
+        self.min_delay = 2.0  # Rate limiting for free tier
+
+        # Model-specific configurations
+        self.model_configs = {
+            "deepseek/deepseek-v3-0324": {
+                "endpoint_type": "openai_compatible",
+                "custom_endpoint": "https://router.huggingface.co/novita/v3/openai/chat/completions"
+            },
+            "microsoft/Phi-3-mini-4k-instruct": {
+                "endpoint_type": "standard"
+            },
+            "deepset/roberta-base-squad2": {
+                "endpoint_type": "qa"
+            }
         }
 
-        # Only add auth header if API key is available
-        if settings.HUGGINGFACE_API_KEY:
-            self.headers["Authorization"] = f"Bearer {settings.HUGGINGFACE_API_KEY}"
-            logger.info("Using authenticated Hugging Face API")
+    def _get_headers(self, use_auth=True, endpoint_type="standard"):
+        """Get headers with proper authentication"""
+        if endpoint_type == "openai_compatible":
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "FastAPI-HF-Client/1.0"
+            }
+            if use_auth and settings.HUGGINGFACE_API_KEY:
+                headers["Authorization"] = f"Bearer {settings.HUGGINGFACE_API_KEY}"
         else:
-            logger.info("Using free tier Hugging Face API (no authentication)")
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": "FastAPI-HF-Client/1.0"
+            }
+            if use_auth and settings.HUGGINGFACE_API_KEY:
+                headers["Authorization"] = f"Bearer {settings.HUGGINGFACE_API_KEY}"
+
+        return headers
+
+    async def _rate_limit(self):
+        """Simple rate limiting"""
+        current_time = time.time()
+        time_since_last = current_time - self.last_request_time
+
+        if time_since_last < self.min_delay:
+            wait_time = self.min_delay - time_since_last
+            logger.info(f"Rate limiting: waiting {wait_time:.2f} seconds")
+            await asyncio.sleep(wait_time)
+
+        self.last_request_time = time.time()
 
     async def generate_text(
             self,
@@ -54,183 +67,211 @@ class HuggingFaceAPI:
             prompt: str,
             parameters: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
-        """Generate text using a Hugging Face model"""
-
-        await self.rate_limiter.wait_if_needed()
+        """Generate text with model-specific handling"""
 
         if parameters is None:
             parameters = {}
 
-        # For free tier, use simpler parameters
-        max_tokens = parameters.get("max_tokens", 100)  # Reduced default
+        model_config = self.model_configs.get(model_name, {"endpoint_type": "standard"})
+        endpoint_type = model_config["endpoint_type"]
+
+        if endpoint_type == "openai_compatible":
+            return await self._generate_openai_compatible(model_name, prompt, parameters)
+        elif endpoint_type == "qa":
+            return await self._generate_qa(model_name, prompt, parameters)
+        else:
+            return await self._generate_standard(model_name, prompt, parameters)
+
+    async def _generate_openai_compatible(self, model_name: str, prompt: str, parameters: Dict[str, Any]) -> Dict[
+        str, Any]:
+        """Generate using OpenAI-compatible endpoint (DeepSeek)"""
+        await self._rate_limit()
+
+        model_config = self.model_configs[model_name]
+        url = model_config["custom_endpoint"]
+
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": parameters.get("temperature", 0.7),
+            "max_tokens": min(parameters.get("max_tokens", 150), 500),
+            "top_p": parameters.get("top_p", 0.9)
+        }
+
+        headers = self._get_headers(endpoint_type="openai_compatible")
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        content = result["choices"][0]["message"]["content"]
+                        return {
+                            "text": content,
+                            "model": model_name,
+                            "provider": "huggingface"
+                        }
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"OpenAI-compatible API error {response.status}: {error_text}")
+                        return self._fallback_response(model_name, prompt)
+
+        except Exception as e:
+            logger.error(f"OpenAI-compatible endpoint error: {e}")
+            return self._fallback_response(model_name, prompt)
+
+    async def _generate_qa(self, model_name: str, prompt: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate using QA endpoint (RoBERTa)"""
+        await self._rate_limit()
+
+        url = f"{self.base_url}/{model_name}"
+
+        # For QA models, we need context and question
+        # Try to parse prompt or use as question with empty context
+        parts = prompt.split("Context:", 1)
+        if len(parts) == 2:
+            context_and_q = parts[1].split("Question:", 1)
+            if len(context_and_q) == 2:
+                context = context_and_q[0].strip()
+                question = context_and_q[1].strip()
+            else:
+                context = parts[1].strip()
+                question = "What is this about?"
+        else:
+            context = ""
+            question = prompt
+
+        payload = {
+            "inputs": {
+                "question": question,
+                "context": context if context else prompt
+            }
+        }
+
+        headers = self._get_headers()
+
+        try:
+            timeout = aiohttp.ClientTimeout(total=60)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(url, headers=headers, json=payload) as response:
+                    if response.status == 200:
+                        result = await response.json()
+                        answer = result.get("answer", "No answer found")
+                        score = result.get("score", 0)
+                        return {
+                            "text": f"Answer: {answer} (Confidence: {score:.2f})",
+                            "model": model_name,
+                            "provider": "huggingface"
+                        }
+                    else:
+                        error_text = await response.text()
+                        logger.error(f"QA API error {response.status}: {error_text}")
+                        return self._fallback_response(model_name, prompt)
+
+        except Exception as e:
+            logger.error(f"QA endpoint error: {e}")
+            return self._fallback_response(model_name, prompt)
+
+    async def _generate_standard(self, model_name: str, prompt: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Generate using standard HF inference API"""
+        await self._rate_limit()
 
         payload = {
             "inputs": prompt,
             "parameters": {
-                "max_new_tokens": min(max_tokens, 250),  # Limit for free tier
+                "max_new_tokens": min(parameters.get("max_tokens", 100), 200),
                 "temperature": parameters.get("temperature", 0.7),
-                "top_p": parameters.get("top_p", 0.9),
                 "do_sample": parameters.get("do_sample", True),
                 "return_full_text": parameters.get("return_full_text", False),
             },
             "options": {
                 "wait_for_model": True,
-                "use_cache": parameters.get("use_cache", True)
+                "use_cache": True
             }
         }
-
-        # Add additional parameters carefully for free tier
-        if settings.HUGGINGFACE_API_KEY:
-            # Authenticated users can use more parameters
-            payload["parameters"].update({k: v for k, v in parameters.items()
-                                          if k not in ["max_tokens", "temperature", "top_p", "do_sample",
-                                                       "return_full_text", "use_cache"]})
 
         url = f"{self.base_url}/{model_name}"
+        headers = self._get_headers()
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=settings.AI_REQUEST_TIMEOUT)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, headers=self.headers, json=payload) as response:
+        auth_methods = [
+            (True, "with authentication"),
+            (False, "without authentication (free tier)")
+        ]
 
-                    if response.status == 200:
-                        result = await response.json()
-                        return self._process_response(result, model_name)
+        if not settings.HUGGINGFACE_API_KEY:
+            auth_methods = [(False, "free tier only")]
 
-                    elif response.status == 401:
-                        # Handle unauthorized - might be API key issue or rate limit
-                        error_data = await response.text()
-                        logger.warning(f"Unauthorized access to {model_name}: {error_data}")
+        for use_auth, method_desc in auth_methods:
+            headers = self._get_headers(use_auth)
 
-                        if settings.HUGGINGFACE_API_KEY:
-                            raise Exception(f"Invalid API key for Hugging Face")
-                        else:
-                            # Try without auth headers for free tier
-                            headers_no_auth = {k: v for k, v in self.headers.items() if k != "Authorization"}
-                            async with session.post(url, headers=headers_no_auth, json=payload) as retry_response:
-                                if retry_response.status == 200:
-                                    result = await retry_response.json()
-                                    return self._process_response(result, model_name)
-                                else:
-                                    error_text = await retry_response.text()
-                                    raise Exception(f"Free tier access failed: {error_text}")
+            try:
+                timeout = aiohttp.ClientTimeout(total=60)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, headers=headers, json=payload) as response:
 
-                    elif response.status == 503:
-                        error_data = await response.json()
-                        estimated_time = error_data.get("estimated_time", 20)
-                        logger.warning(f"Model {model_name} is loading, estimated time: {estimated_time}s")
+                        if response.status == 200:
+                            result = await response.json()
+                            return self._process_response(result, model_name)
 
-                        if estimated_time < 60:  # Wait up to 1 minute
-                            await asyncio.sleep(min(estimated_time + 5, 30))  # Cap wait time
-                            return await self.generate_text(model_name, prompt, parameters)
-                        else:
-                            raise Exception(f"Model loading time too long: {estimated_time}s")
+                        elif response.status == 503:
+                            error_data = await response.json()
+                            estimated_time = error_data.get("estimated_time", 20)
 
-                    elif response.status == 429:
-                        logger.warning("Rate limited by Hugging Face API")
-                        await asyncio.sleep(10)  # Wait longer for rate limits
-                        raise Exception("Rate limited - try again later")
+                            if estimated_time < 60:
+                                await asyncio.sleep(min(estimated_time + 5, 30))
+                                async with session.post(url, headers=headers, json=payload) as retry_response:
+                                    if retry_response.status == 200:
+                                        result = await retry_response.json()
+                                        return self._process_response(result, model_name)
 
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"HF API error {response.status}: {error_text}")
-                        raise Exception(f"Hugging Face API error: {response.status} - {error_text}")
+                        elif response.status == 401 and use_auth:
+                            continue  # Try without auth
 
-        except asyncio.TimeoutError:
-            logger.error(f"Timeout calling Hugging Face model: {model_name}")
-            raise Exception("Request timeout")
-        except aiohttp.ClientError as e:
-            logger.error(f"Client error calling Hugging Face API: {e}")
-            raise Exception(f"Connection error: {str(e)}")
-        except Exception as e:
-            logger.error(f"Error calling Hugging Face API: {e}")
-            raise
+            except Exception as e:
+                logger.warning(f"Standard endpoint error {method_desc}: {e}")
+                continue
+
+        return self._fallback_response(model_name, prompt)
 
     def _process_response(self, response: Any, model_name: str) -> Dict[str, Any]:
-        """Process Hugging Face API response"""
-
+        """Process HuggingFace API response"""
         if isinstance(response, list) and len(response) > 0:
-            generated_text = response[0].get("generated_text", "")
-            return {
-                "text": generated_text,
-                "model": model_name,
-                "provider": "huggingface"
-            }
-        elif isinstance(response, dict):
-            # Handle different response formats
-            if "generated_text" in response:
+            item = response[0]
+            if isinstance(item, dict) and "generated_text" in item:
                 return {
-                    "text": response["generated_text"],
+                    "text": item["generated_text"],
                     "model": model_name,
                     "provider": "huggingface"
                 }
-            else:
-                return {
-                    "text": str(response),
-                    "model": model_name,
-                    "provider": "huggingface"
-                }
-        else:
-            logger.warning(f"Unexpected response format from {model_name}: {response}")
-            return {
-                "text": str(response),
-                "model": model_name,
-                "provider": "huggingface"
-            }
 
-    async def get_model_info(self, model_name: str) -> Dict[str, Any]:
-        """Get information about a Hugging Face model"""
-
-        url = f"https://huggingface.co/api/models/{model_name}"
-        headers = {"User-Agent": "FastAPI-HF-Client/1.0"}
-
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, headers=headers) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        return {"error": f"Could not fetch model info: {response.status}"}
-        except Exception as e:
-            logger.error(f"Error fetching model info: {e}")
-            return {"error": str(e)}
-
-    async def list_available_models(self, task: Optional[str] = None) -> List[Dict[str, Any]]:
-        """List available models for a specific task"""
-
-        url = "https://huggingface.co/api/models"
-        params = {
-            "filter": "inference",
-            "sort": "downloads",
-            "direction": -1,
-            "limit": 50
+        return {
+            "text": str(response),
+            "model": model_name,
+            "provider": "huggingface"
         }
 
-        if task:
-            params["pipeline_tag"] = task
+    def _fallback_response(self, model_name: str, prompt: str) -> Dict[str, Any]:
+        """Provide fallback response when API fails"""
+        return {
+            "text": f"I apologize, but I'm having trouble connecting to the {model_name} model right now. Please try again in a moment.",
+            "model": model_name,
+            "provider": "huggingface",
+            "fallback": True
+        }
 
-        headers = {"User-Agent": "FastAPI-HF-Client/1.0"}
-
+    async def test_model_availability(self, model_name: str) -> bool:
+        """Test if a model is available"""
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url, params=params, headers=headers) as response:
-                    if response.status == 200:
-                        models = await response.json()
-                        return [
-                            {
-                                "id": model.get("id"),
-                                "pipeline_tag": model.get("pipeline_tag"),
-                                "downloads": model.get("downloads", 0),
-                                "likes": model.get("likes", 0),
-                                "tags": model.get("tags", [])
-                            }
-                            for model in models
-                        ]
-                    else:
-                        return []
-        except Exception as e:
-            logger.error(f"Error listing models: {e}")
-            return []
+            result = await self.generate_text(
+                model_name=model_name,
+                prompt="Hello",
+                parameters={"max_tokens": 10}
+            )
+            return not result.get("fallback", False)
+        except:
+            return False
 
 
+# Global instance
 hf_api = HuggingFaceAPI()
