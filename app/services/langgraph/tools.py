@@ -1,3 +1,4 @@
+# app/services/langgraph/tools.py
 from typing import Dict, Any, List, Optional
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -24,14 +25,26 @@ class Calculator(BaseTool):
     def _run(self, expression: str) -> str:
         """Execute calculator tool"""
         try:
-            # Allow only safe mathematical operations
+            # Enhanced security for eval
             allowed_chars = set('0123456789+-*/().% ')
-            if not all(c in allowed_chars for c in expression):
+            allowed_names = {
+                'abs', 'round', 'min', 'max', 'sum',
+                'sqrt', 'pow', 'log', 'log10', 'exp',
+                'sin', 'cos', 'tan', 'pi', 'e'
+            }
+
+            if not all(c in allowed_chars or c.isalpha() for c in expression):
                 return "Error: Expression contains invalid characters"
 
-            # Use eval with restricted builtins for safety
-            result = eval(expression, {"__builtins__": {}, "math": math})
+            # Safe evaluation with math functions
+            safe_dict = {
+                "__builtins__": {},
+                **{name: getattr(math, name) for name in allowed_names if hasattr(math, name)}
+            }
+
+            result = eval(expression, safe_dict)
             return f"Result: {result}"
+
         except Exception as e:
             return f"Error: {str(e)}"
 
@@ -52,50 +65,71 @@ class TextAnalyzer(BaseTool):
             if analysis_type == "length":
                 words = len(text.split())
                 chars = len(text)
-                return f"Text length: {words} words, {chars} characters"
+                sentences = len(re.split(r'[.!?]+', text))
+                return f"Text length: {words} words, {chars} characters, {sentences} sentences"
 
             elif analysis_type == "keywords":
                 words = re.findall(r'\b\w+\b', text.lower())
+                # Filter out common stop words
+                stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'by'}
+                words = [word for word in words if len(word) > 3 and word not in stop_words]
+
                 word_freq = {}
                 for word in words:
-                    if len(word) > 3:  # Only words longer than 3 characters
-                        word_freq[word] = word_freq.get(word, 0) + 1
+                    word_freq[word] = word_freq.get(word, 0) + 1
 
                 top_keywords = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)[:10]
-                keywords = [word for word, count in top_keywords]
+                keywords = [f"{word} ({count})" for word, count in top_keywords]
                 return f"Top keywords: {', '.join(keywords)}"
 
             elif analysis_type == "summary":
                 sentences = re.split(r'[.!?]+', text)
                 sentences = [s.strip() for s in sentences if s.strip()]
+
                 if len(sentences) <= 2:
                     return f"Summary: {text}"
                 else:
-                    # Simple extractive summary - first and last sentences
-                    summary = f"{sentences[0]}. {sentences[-1]}."
+                    # Take first and last sentences, and middle if more than 4 sentences
+                    summary_sentences = [sentences[0]]
+                    if len(sentences) > 4:
+                        summary_sentences.append(sentences[len(sentences) // 2])
+                    summary_sentences.append(sentences[-1])
+                    summary = ". ".join(summary_sentences) + "."
                     return f"Summary: {summary}"
 
             elif analysis_type == "sentiment":
-                positive_words = ["good", "great", "excellent", "amazing", "wonderful", "fantastic", "love", "like",
-                                  "happy", "joy", "positive", "awesome", "brilliant", "perfect", "outstanding"]
-                negative_words = ["bad", "terrible", "awful", "hate", "dislike", "sad", "angry", "frustrated",
-                                  "disappointed", "horrible", "negative", "worst", "ugly", "disgusting"]
+                positive_words = [
+                    "good", "great", "excellent", "amazing", "wonderful", "fantastic",
+                    "love", "like", "happy", "joy", "pleased", "satisfied", "awesome",
+                    "brilliant", "perfect", "outstanding", "superb", "magnificent"
+                ]
+                negative_words = [
+                    "bad", "terrible", "awful", "hate", "dislike", "sad", "angry",
+                    "frustrated", "disappointed", "horrible", "disgusting", "poor",
+                    "worst", "pathetic", "useless", "annoying", "boring"
+                ]
 
                 text_lower = text.lower()
                 pos_count = sum(1 for word in positive_words if word in text_lower)
                 neg_count = sum(1 for word in negative_words if word in text_lower)
 
-                if pos_count > neg_count:
+                total_words = len(text.split())
+                pos_ratio = pos_count / max(total_words, 1)
+                neg_ratio = neg_count / max(total_words, 1)
+
+                if pos_count > neg_count * 1.5:
                     sentiment = "Positive"
-                elif neg_count > pos_count:
+                elif neg_count > pos_count * 1.5:
                     sentiment = "Negative"
                 else:
                     sentiment = "Neutral"
 
-                return f"Sentiment: {sentiment} (Positive words: {pos_count}, Negative words: {neg_count})"
+                confidence = abs(pos_ratio - neg_ratio) * 100
+
+                return f"Sentiment: {sentiment} (Confidence: {confidence:.1f}%, Positive: {pos_count}, Negative: {neg_count})"
 
             else:
-                return f"Error: Unknown analysis type '{analysis_type}'. Use: sentiment, summary, keywords, or length"
+                return f"Error: Unknown analysis type '{analysis_type}'. Available: sentiment, summary, keywords, length"
 
         except Exception as e:
             return f"Error: {str(e)}"
@@ -114,14 +148,58 @@ class WebSearch(BaseTool):
     async def _arun(self, query: str, max_results: int = 5) -> str:
         """Execute web search tool (async)"""
         try:
-            # For demo purposes, return mock search results
-            # In production, integrate with actual search API (Google, Bing, DuckDuckGo, etc.)
+            # For demo/development - using DuckDuckGo instant answer API
+            search_url = f"https://api.duckduckgo.com/?q={query}&format=json&no_html=1&skip_disambig=1"
+
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(search_url, timeout=10) as response:
+                        if response.status == 200:
+                            data = await response.json()
+
+                            results = []
+
+                            # Check for instant answer
+                            if data.get('Abstract'):
+                                results.append({
+                                    "title": data.get('Heading', 'Instant Answer'),
+                                    "snippet": data['Abstract'],
+                                    "url": data.get('AbstractURL', 'N/A')
+                                })
+
+                            # Check for related topics
+                            for topic in data.get('RelatedTopics', [])[:max_results - len(results)]:
+                                if isinstance(topic, dict) and 'Text' in topic:
+                                    results.append({
+                                        "title": topic.get('Text', '')[:50] + "...",
+                                        "snippet": topic.get('Text', ''),
+                                        "url": topic.get('FirstURL', 'N/A')
+                                    })
+
+                            if results:
+                                formatted_results = []
+                                for i, result in enumerate(results, 1):
+                                    formatted_results.append(
+                                        f"{i}. {result['title']}\n"
+                                        f"   URL: {result['url']}\n"
+                                        f"   {result['snippet'][:200]}..."
+                                    )
+                                return "Search Results:\n" + "\n\n".join(formatted_results)
+                            else:
+                                return f"No specific results found for '{query}'. You may want to try a more specific search query."
+
+                except asyncio.TimeoutError:
+                    pass
+                except Exception:
+                    pass
+
+            # Fallback to mock results for development
             mock_results = [
                 {
                     "title": f"Search result {i + 1} for '{query}'",
                     "url": f"https://example.com/result-{i + 1}",
                     "snippet": f"This is a mock search result snippet for query '{query}'. "
-                               f"This would contain relevant information from the web about your search topic."
+                               f"This would contain relevant information from the web about {query}."
                 }
                 for i in range(min(max_results, 3))
             ]
@@ -134,7 +212,7 @@ class WebSearch(BaseTool):
                     f"   {result['snippet']}"
                 )
 
-            return "Search Results:\n" + "\n\n".join(formatted_results)
+            return "Search Results (Mock Data):\n" + "\n\n".join(formatted_results)
 
         except Exception as e:
             return f"Error performing web search: {str(e)}"
@@ -146,13 +224,13 @@ class WebSearch(BaseTool):
 
 class DataProcessorInput(BaseModel):
     data: Dict[str, Any] = Field(description="Data to process")
-    operation: str = Field(description="Operation to perform: filter, sort, aggregate, or transform")
+    operation: str = Field(description="Operation to perform: filter, sort, aggregate, transform, or validate")
     parameters: Dict[str, Any] = Field(default={}, description="Operation parameters")
 
 
 class DataProcessor(BaseTool):
     name: str = "data_processor"
-    description: str = "Processes data with operations like filtering, sorting, aggregation, and transformation."
+    description: str = "Processes data with operations like filtering, sorting, aggregation, transformation, and validation."
     args_schema = DataProcessorInput
 
     def _run(self, data: Dict[str, Any], operation: str, parameters: Dict[str, Any] = None) -> str:
@@ -162,170 +240,225 @@ class DataProcessor(BaseTool):
 
         try:
             if operation == "filter":
-                filter_key = parameters.get("key")
-                filter_value = parameters.get("value")
-
-                if not filter_key:
-                    return "Error: Filter operation requires 'key' parameter"
-
-                if isinstance(data, list):
-                    filtered = [item for item in data if item.get(filter_key) == filter_value]
-                    return f"Filtered data: {json.dumps(filtered, indent=2)}"
-                elif isinstance(data, dict):
-                    if data.get(filter_key) == filter_value:
-                        return f"Data matches filter: {json.dumps(data, indent=2)}"
-                    else:
-                        return "Data does not match filter criteria"
-
+                return self._filter_data(data, parameters)
             elif operation == "sort":
-                sort_key = parameters.get("key")
-                reverse = parameters.get("reverse", False)
-
-                if isinstance(data, list) and sort_key:
-                    sorted_data = sorted(data, key=lambda x: x.get(sort_key, 0), reverse=reverse)
-                    return f"Sorted data: {json.dumps(sorted_data, indent=2)}"
-                else:
-                    return "Error: Sort operation requires list data and 'key' parameter"
-
+                return self._sort_data(data, parameters)
             elif operation == "aggregate":
-                agg_key = parameters.get("key")
-                agg_func = parameters.get("function", "sum")
-
-                if isinstance(data, list) and agg_key:
-                    values = [item.get(agg_key) for item in data if agg_key in item]
-                    numeric_values = [v for v in values if isinstance(v, (int, float))]
-
-                    if agg_func == "sum":
-                        result = sum(numeric_values)
-                    elif agg_func == "count":
-                        result = len(values)
-                    elif agg_func == "avg":
-                        result = sum(numeric_values) / len(numeric_values) if numeric_values else 0
-                    elif agg_func == "min":
-                        result = min(numeric_values) if numeric_values else None
-                    elif agg_func == "max":
-                        result = max(numeric_values) if numeric_values else None
-                    else:
-                        return f"Error: Unknown aggregation function '{agg_func}'"
-
-                    return f"Aggregation result ({agg_func} of {agg_key}): {result}"
-                else:
-                    return "Error: Aggregate operation requires list data and 'key' parameter"
-
+                return self._aggregate_data(data, parameters)
             elif operation == "transform":
-                # Simple data transformation
-                transform_type = parameters.get("type", "json")
-
-                if transform_type == "json":
-                    return f"JSON representation: {json.dumps(data, indent=2)}"
-                elif transform_type == "keys":
-                    if isinstance(data, dict):
-                        return f"Keys: {list(data.keys())}"
-                    elif isinstance(data, list) and data and isinstance(data[0], dict):
-                        return f"Common keys: {list(data[0].keys())}"
-                elif transform_type == "values":
-                    if isinstance(data, dict):
-                        return f"Values: {list(data.values())}"
-                elif transform_type == "count":
-                    if isinstance(data, (list, dict)):
-                        return f"Count: {len(data)}"
-                    else:
-                        return f"Count: 1 (single item)"
-
-                return f"Transformed data ({transform_type}): {str(data)}"
-
+                return self._transform_data(data, parameters)
+            elif operation == "validate":
+                return self._validate_data(data, parameters)
             else:
-                return f"Error: Unknown operation '{operation}'. Available: filter, sort, aggregate, transform"
+                return f"Error: Unknown operation '{operation}'. Available: filter, sort, aggregate, transform, validate"
 
         except Exception as e:
             return f"Error: {str(e)}"
 
+    def _filter_data(self, data: Dict[str, Any], parameters: Dict[str, Any]) -> str:
+        """Filter data based on criteria"""
+        filter_key = parameters.get("key")
+        filter_value = parameters.get("value")
+        filter_condition = parameters.get("condition", "equals")  # equals, greater, less, contains
 
-class APICallInput(BaseModel):
-    url: str = Field(description="API endpoint URL")
-    method: str = Field(default="GET", description="HTTP method (GET, POST, PUT, DELETE)")
-    headers: Dict[str, str] = Field(default={}, description="HTTP headers")
-    params: Dict[str, Any] = Field(default={}, description="Query parameters")
-    data: Dict[str, Any] = Field(default={}, description="Request body data")
+        if not filter_key:
+            return "Error: Filter operation requires 'key' parameter"
 
+        if isinstance(data, list):
+            filtered = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
 
-class APICaller(BaseTool):
-    name: str = "api_caller"
-    description: str = "Makes HTTP API calls to external services."
-    args_schema = APICallInput
+                item_value = item.get(filter_key)
+                if self._matches_condition(item_value, filter_value, filter_condition):
+                    filtered.append(item)
 
-    async def _arun(self, url: str, method: str = "GET", headers: Dict[str, str] = None,
-                    params: Dict[str, Any] = None, data: Dict[str, Any] = None) -> str:
-        """Execute API call (async)"""
-        if headers is None:
-            headers = {}
-        if params is None:
-            params = {}
-        if data is None:
-            data = {}
+            return f"Filtered data ({len(filtered)} items): {json.dumps(filtered, indent=2)}"
 
+        elif isinstance(data, dict):
+            if self._matches_condition(data.get(filter_key), filter_value, filter_condition):
+                return f"Data matches filter: {json.dumps(data, indent=2)}"
+            else:
+                return "Data does not match filter criteria"
+
+    def _matches_condition(self, item_value: Any, filter_value: Any, condition: str) -> bool:
+        """Check if item value matches filter condition"""
         try:
-            timeout = aiohttp.ClientTimeout(total=30)
+            if condition == "equals":
+                return item_value == filter_value
+            elif condition == "greater":
+                return float(item_value) > float(filter_value)
+            elif condition == "less":
+                return float(item_value) < float(filter_value)
+            elif condition == "contains":
+                return str(filter_value).lower() in str(item_value).lower()
+            else:
+                return item_value == filter_value
+        except (ValueError, TypeError):
+            return False
 
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.request(
-                        method=method.upper(),
-                        url=url,
-                        headers=headers,
-                        params=params,
-                        json=data if data else None
-                ) as response:
+    def _sort_data(self, data: Dict[str, Any], parameters: Dict[str, Any]) -> str:
+        """Sort data by specified key"""
+        sort_key = parameters.get("key")
+        reverse = parameters.get("reverse", False)
 
-                    result = {
-                        "status_code": response.status,
-                        "headers": dict(response.headers),
-                        "url": str(response.url)
-                    }
+        if isinstance(data, list) and sort_key:
+            try:
+                sorted_data = sorted(
+                    data,
+                    key=lambda x: x.get(sort_key, 0) if isinstance(x, dict) else 0,
+                    reverse=reverse
+                )
+                return f"Sorted data ({len(sorted_data)} items): {json.dumps(sorted_data, indent=2)}"
+            except Exception as e:
+                return f"Error sorting data: {str(e)}"
+        else:
+            return "Error: Sort operation requires list data and 'key' parameter"
 
-                    try:
-                        result["data"] = await response.json()
-                    except:
-                        result["data"] = await response.text()
+    def _aggregate_data(self, data: Dict[str, Any], parameters: Dict[str, Any]) -> str:
+        """Aggregate data using specified function"""
+        agg_key = parameters.get("key")
+        agg_func = parameters.get("function", "sum")
 
-                    return f"API Response: {json.dumps(result, indent=2)}"
+        if isinstance(data, list) and agg_key:
+            values = [item.get(agg_key) for item in data if isinstance(item, dict) and agg_key in item]
+            numeric_values = [v for v in values if isinstance(v, (int, float))]
 
-        except Exception as e:
-            return f"Error making API call: {str(e)}"
+            if agg_func == "sum":
+                result = sum(numeric_values)
+            elif agg_func == "count":
+                result = len(values)
+            elif agg_func == "avg" or agg_func == "average":
+                result = sum(numeric_values) / len(numeric_values) if numeric_values else 0
+            elif agg_func == "min":
+                result = min(numeric_values) if numeric_values else None
+            elif agg_func == "max":
+                result = max(numeric_values) if numeric_values else None
+            elif agg_func == "median":
+                if numeric_values:
+                    sorted_values = sorted(numeric_values)
+                    n = len(sorted_values)
+                    result = sorted_values[n // 2] if n % 2 == 1 else (sorted_values[n // 2 - 1] + sorted_values[
+                        n // 2]) / 2
+                else:
+                    result = None
+            else:
+                return f"Error: Unknown aggregation function '{agg_func}'"
 
-    def _run(self, url: str, method: str = "GET", headers: Dict[str, str] = None,
-             params: Dict[str, Any] = None, data: Dict[str, Any] = None) -> str:
-        """Sync wrapper for API call"""
-        return asyncio.run(self._arun(url, method, headers, params, data))
+            return f"Aggregation result ({agg_func} of {agg_key}): {result}"
+        else:
+            return "Error: Aggregate operation requires list data and 'key' parameter"
+
+    def _transform_data(self, data: Dict[str, Any], parameters: Dict[str, Any]) -> str:
+        """Transform data format"""
+        transform_type = parameters.get("type", "json")
+
+        if transform_type == "json":
+            return f"JSON representation: {json.dumps(data, indent=2)}"
+        elif transform_type == "keys":
+            if isinstance(data, dict):
+                return f"Keys: {list(data.keys())}"
+            elif isinstance(data, list) and data and isinstance(data[0], dict):
+                all_keys = set()
+                for item in data:
+                    if isinstance(item, dict):
+                        all_keys.update(item.keys())
+                return f"All keys: {list(all_keys)}"
+        elif transform_type == "values":
+            if isinstance(data, dict):
+                return f"Values: {list(data.values())}"
+        elif transform_type == "count":
+            if isinstance(data, (list, dict)):
+                return f"Count: {len(data)}"
+            else:
+                return f"Count: 1 (single item)"
+        elif transform_type == "flatten":
+            if isinstance(data, list):
+                flattened = []
+                for item in data:
+                    if isinstance(item, list):
+                        flattened.extend(item)
+                    else:
+                        flattened.append(item)
+                return f"Flattened data: {json.dumps(flattened, indent=2)}"
+
+        return f"Transformed data ({transform_type}): {str(data)}"
+
+    def _validate_data(self, data: Dict[str, Any], parameters: Dict[str, Any]) -> str:
+        """Validate data structure"""
+        schema = parameters.get("schema", {})
+        required_fields = parameters.get("required_fields", [])
+
+        validation_results = []
+
+        if isinstance(data, dict):
+            # Check required fields
+            for field in required_fields:
+                if field not in data:
+                    validation_results.append(f"Missing required field: {field}")
+                elif data[field] is None or data[field] == "":
+                    validation_results.append(f"Empty required field: {field}")
+
+            # Check schema if provided
+            for field, expected_type in schema.items():
+                if field in data:
+                    actual_type = type(data[field]).__name__
+                    if actual_type != expected_type:
+                        validation_results.append(
+                            f"Type mismatch for {field}: expected {expected_type}, got {actual_type}")
+
+        elif isinstance(data, list):
+            for i, item in enumerate(data):
+                if isinstance(item, dict):
+                    for field in required_fields:
+                        if field not in item:
+                            validation_results.append(f"Item {i}: Missing required field: {field}")
+
+        if validation_results:
+            return f"Validation failed:\n" + "\n".join(validation_results)
+        else:
+            return "Validation passed: Data structure is valid"
 
 
 class ToolRegistry:
-    """Registry for managing AI tools"""
+    """Enhanced registry for managing AI tools"""
 
     def __init__(self):
         self.tools = {}
+        self.tool_categories = {}
         self._register_default_tools()
 
     def _register_default_tools(self):
         """Register default tools"""
         default_tools = [
-            Calculator(),
-            TextAnalyzer(),
-            WebSearch(),
-            DataProcessor(),
-            APICaller()
+            (Calculator(), "computation"),
+            (TextAnalyzer(), "text_processing"),
+            (WebSearch(), "information_retrieval"),
+            (DataProcessor(), "data_manipulation")
         ]
 
-        for tool in default_tools:
-            self.register_tool(tool)
+        for tool, category in default_tools:
+            self.register_tool(tool, category)
 
-    def register_tool(self, tool: BaseTool):
-        """Register a tool"""
+    def register_tool(self, tool: BaseTool, category: str = "general"):
+        """Register a tool with category"""
         self.tools[tool.name] = tool
-        logger.info(f"Registered tool: {tool.name}")
+
+        if category not in self.tool_categories:
+            self.tool_categories[category] = []
+        self.tool_categories[category].append(tool.name)
+
+        logger.info(f"Registered tool: {tool.name} in category: {category}")
 
     def get_tool(self, name: str) -> Optional[BaseTool]:
         """Get tool by name"""
         return self.tools.get(name)
+
+    def get_tools_by_category(self, category: str) -> List[BaseTool]:
+        """Get tools by category"""
+        tool_names = self.tool_categories.get(category, [])
+        return [self.tools[name] for name in tool_names if name in self.tools]
 
     def get_all_tools(self) -> List[BaseTool]:
         """Get all registered tools"""
@@ -338,23 +471,39 @@ class ToolRegistry:
             schema = {
                 "name": tool.name,
                 "description": tool.description,
-                "parameters": tool.args_schema.model_json_schema() if tool.args_schema else {}
+                "parameters": tool.args_schema.model_json_schema() if tool.args_schema else {},
+                "category": self._get_tool_category(tool.name)
             }
             schemas.append(schema)
         return schemas
 
-    def remove_tool(self, name: str) -> bool:
-        """Remove a tool from registry"""
-        if name in self.tools:
-            del self.tools[name]
-            logger.info(f"Removed tool: {name}")
-            return True
-        return False
+    def _get_tool_category(self, tool_name: str) -> str:
+        """Get category for a tool"""
+        for category, tools in self.tool_categories.items():
+            if tool_name in tools:
+                return category
+        return "general"
 
-    def list_tools(self) -> Dict[str, str]:
-        """List all tools with descriptions"""
-        return {name: tool.description for name, tool in self.tools.items()}
+    def get_tool_usage_stats(self) -> Dict[str, Any]:
+        """Get tool usage statistics"""
+        return {
+            "total_tools": len(self.tools),
+            "categories": {cat: len(tools) for cat, tools in self.tool_categories.items()},
+            "tool_list": list(self.tools.keys())
+        }
+
+    def search_tools(self, query: str) -> List[str]:
+        """Search tools by name or description"""
+        query_lower = query.lower()
+        matching_tools = []
+
+        for tool_name, tool in self.tools.items():
+            if (query_lower in tool_name.lower() or
+                    query_lower in tool.description.lower()):
+                matching_tools.append(tool_name)
+
+        return matching_tools
 
 
-# Global registry instance
+# Global instance
 tool_registry = ToolRegistry()

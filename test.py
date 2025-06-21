@@ -1,474 +1,364 @@
-#!/usr/bin/env python3
-"""
-Week 3 Integration Test Suite
-
-Comprehensive tests for the complete Week 3 implementation:
-- Kafka infrastructure
-- Event-driven workflows
-- AI integration
-- End-to-end scenarios
-"""
-
-import pytest
+# test_integration.py
 import asyncio
+import sys
 import json
-import time
 import uuid
 from datetime import datetime
-from typing import Dict, Any, List
 
-import sys
-import os
+sys.path.append('.')
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.services.kafka.producer import event_producer
-from app.services.kafka.consumer import WorkflowEventConsumer
-from app.services.kafka.admin import kafka_admin
-from app.schemas.events import (
-    EventType, create_execution_event, create_node_event,
-    create_ai_request_event, create_tool_call_event
-)
-from app.services.langgraph.workflow import BasicWorkflowEngine
-from app.services.ai.model_factory import model_factory
-from app.core.database import async_session_maker
-
-
-class Week3IntegrationTest:
-    """Complete Week 3 integration test suite"""
-
-    def __init__(self):
-        self.test_results = {}
-        self.execution_id = str(uuid.uuid4())
-        self.workflow_id = str(uuid.uuid4())
-
-    async def run_all_tests(self) -> Dict[str, Any]:
-        """Run comprehensive test suite"""
-        print("🧪 Starting Week 3 Integration Test Suite")
-        print("=" * 50)
-
-        test_methods = [
-            self.test_kafka_infrastructure,
-            self.test_event_publishing,
-            self.test_event_consumption,
-            self.test_workflow_execution,
-            self.test_ai_integration,
-            self.test_tool_execution,
-            self.test_error_handling,
-            self.test_performance,
-            self.test_end_to_end_scenario
-        ]
-
-        overall_success = True
-
-        for test_method in test_methods:
-            test_name = test_method.__name__
-            print(f"\n🔬 Running {test_name}...")
-
-            try:
-                start_time = time.time()
-                result = await test_method()
-                duration = time.time() - start_time
-
-                self.test_results[test_name] = {
-                    'status': 'passed' if result else 'failed',
-                    'duration': duration,
-                    'details': result if isinstance(result, dict) else {}
-                }
-
-                status = "✅ PASSED" if result else "❌ FAILED"
-                print(f"   {status} ({duration:.2f}s)")
-
-                if not result:
-                    overall_success = False
-
-            except Exception as e:
-                self.test_results[test_name] = {
-                    'status': 'error',
-                    'duration': 0,
-                    'error': str(e)
-                }
-                print(f"   ❌ ERROR: {e}")
-                overall_success = False
-
-        # Print summary
-        self._print_test_summary(overall_success)
-
-        return {
-            'overall_success': overall_success,
-            'test_results': self.test_results,
-            'execution_id': self.execution_id
-        }
-
-    async def test_kafka_infrastructure(self) -> bool:
-        """Test Kafka infrastructure setup"""
-        try:
-            # Test admin connectivity
-            await kafka_admin.start()
-            health = await kafka_admin.monitor_cluster_health()
-            await kafka_admin.stop()
-
-            # Check cluster health
-            overall_status = health.get('overall_status')
-            if overall_status not in ['healthy', 'degraded']:
-                return False
-
-            # Check topics
-            topic_health = health.get('topic_health', {})
-            required_topics = [
-                'workflow-events',
-                'execution-events',
-                'node-events',
-                'dead-letter-queue'
-            ]
-
-            for topic in required_topics:
-                if topic not in topic_health:
-                    print(f"   Missing topic: {topic}")
-                    return False
-
-            return True
-
-        except Exception as e:
-            print(f"   Kafka infrastructure error: {e}")
-            return False
-
-    async def test_event_publishing(self) -> bool:
-        """Test event publishing functionality"""
-        try:
-            # Ensure producer is started
-            if not event_producer.is_started:
-                await event_producer.start()
-
-            # Test different event types
-            test_events = [
-                create_execution_event(
-                    event_type=EventType.EXECUTION_STARTED,
-                    execution_id=self.execution_id,
-                    workflow_id=self.workflow_id,
-                    execution_status="running"
-                ),
-                create_node_event(
-                    event_type=EventType.NODE_STARTED,
-                    execution_id=self.execution_id,
-                    workflow_id=self.workflow_id,
-                    node_id="test_node",
-                    node_type="test"
-                ),
-                create_ai_request_event(
-                    event_type=EventType.AI_REQUEST_STARTED,
-                    execution_id=self.execution_id,
-                    workflow_id=self.workflow_id,
-                    ai_provider="openai",
-                    ai_model="gpt-4"
-                )
-            ]
-
-            success_count = 0
-            for event in test_events:
-                success = await event_producer.publish_event(event)
-                if success:
-                    success_count += 1
-
-            return success_count == len(test_events)
-
-        except Exception as e:
-            print(f"   Event publishing error: {e}")
-            return False
-
-    async def test_event_consumption(self) -> bool:
-        """Test event consumption functionality"""
-        try:
-            # Create a test consumer
-            async def mock_db_session():
-                class MockSession:
-                    async def execute(self, *args, **kwargs):
-                        pass
-
-                    async def commit(self, *args, **kwargs):
-                        pass
-
-                    async def rollback(self, *args, **kwargs):
-                        pass
-
-                return MockSession()
-
-            consumer = WorkflowEventConsumer(mock_db_session)
-
-            # Test event creation and parsing
-            test_event_data = {
-                "event_type": "execution.started",
-                "event_id": str(uuid.uuid4()),
-                "execution_id": self.execution_id,
-                "workflow_id": self.workflow_id,
-                "execution_status": "running",
-                "timestamp": datetime.utcnow().isoformat()
-            }
-
-            # Test event payload creation
-            event_payload = consumer._create_event_payload(
-                EventType.EXECUTION_STARTED,
-                test_event_data
-            )
-
-            return event_payload is not None
-
-        except Exception as e:
-            print(f"   Event consumption error: {e}")
-            return False
-
-    async def test_workflow_execution(self) -> bool:
-        """Test basic workflow execution"""
-        try:
-            async with async_session_maker() as db:
-                engine = BasicWorkflowEngine(db)
-
-                # Test workflow creation
-                workflow = await engine.create_basic_workflow()
-
-                if workflow is None:
-                    return False
-
-                # Test state management
-                state_manager = engine.state_manager
-                initial_state = state_manager.create_initial_state(
-                    execution_id=self.execution_id,
-                    workflow_id=self.workflow_id,
-                    input_data={"query": "test query"},
-                    ai_config={"provider": "huggingface", "model": "gpt2"}
-                )
-
-                return initial_state is not None
-
-        except Exception as e:
-            print(f"   Workflow execution error: {e}")
-            return False
-
-    async def test_ai_integration(self) -> bool:
-        """Test AI model integration"""
-        try:
-            # Test model factory
-            providers = model_factory.get_available_providers()
-
-            if not providers:
-                print("   No AI providers available")
-                return False
-
-            # Test HuggingFace integration (always available)
-            from app.services.ai.huggingface_service import hf_api
-
-            test_result = await hf_api.generate_text(
-                model_name="gpt2",
-                prompt="Hello world",
-                parameters={"max_tokens": 10}
-            )
-
-            return "text" in test_result
-
-        except Exception as e:
-            print(f"   AI integration error: {e}")
-            return False
-
-    async def test_tool_execution(self) -> bool:
-        """Test tool execution functionality"""
-        try:
-            from app.services.langgraph.tools import tool_registry
-
-            # Test calculator tool
-            calculator = tool_registry.get_tool("calculator")
-            if calculator is None:
-                return False
-
-            result = calculator._run("2 + 2")
-            if "4" not in result:
-                return False
-
-            # Test text analyzer tool
-            text_analyzer = tool_registry.get_tool("text_analyzer")
-            if text_analyzer is None:
-                return False
-
-            result = text_analyzer._run("hello world", "length")
-            if "2 words" not in result:
-                return False
-
-            return True
-
-        except Exception as e:
-            print(f"   Tool execution error: {e}")
-            return False
-
-    async def test_error_handling(self) -> bool:
-        """Test error handling mechanisms"""
-        try:
-            # Test error event publishing
-            error_event = create_execution_event(
-                event_type=EventType.EXECUTION_FAILED,
-                execution_id=self.execution_id,
-                workflow_id=self.workflow_id,
-                execution_status="failed",
-                error_data={
-                    "error_type": "TestError",
-                    "message": "Test error handling"
-                }
-            )
-
-            success = await event_producer.publish_event(error_event)
-            return success
-
-        except Exception as e:
-            print(f"   Error handling test error: {e}")
-            return False
-
-    async def test_performance(self) -> bool:
-        """Test basic performance metrics"""
-        try:
-            # Test event publishing performance
-            start_time = time.time()
-
-            events = [
-                create_execution_event(
-                    event_type=EventType.EXECUTION_COMPLETED,
-                    execution_id=str(uuid.uuid4()),
-                    workflow_id=self.workflow_id,
-                    execution_status="completed"
-                ) for _ in range(10)
-            ]
-
-            results = await event_producer.publish_batch(events)
-
-            end_time = time.time()
-            duration = end_time - start_time
-
-            # Should complete within reasonable time
-            if duration > 10.0:  # 10 seconds for 10 events
-                print(f"   Performance too slow: {duration:.2f}s for 10 events")
-                return False
-
-            # Should have high success rate
-            success_rate = results['success'] / (results['success'] + results['failed'])
-            if success_rate < 0.8:  # 80% success rate
-                print(f"   Low success rate: {success_rate:.2%}")
-                return False
-
-            return True
-
-        except Exception as e:
-            print(f"   Performance test error: {e}")
-            return False
-
-    async def test_end_to_end_scenario(self) -> bool:
-        """Test complete end-to-end workflow scenario"""
-        try:
-            # Simulate complete workflow execution with events
-            scenario_id = str(uuid.uuid4())
-
-            # 1. Workflow started
-            start_event = create_execution_event(
-                event_type=EventType.EXECUTION_STARTED,
-                execution_id=scenario_id,
-                workflow_id=self.workflow_id,
-                execution_status="running",
-                input_data={"query": "end-to-end test"}
-            )
-
-            success1 = await event_producer.publish_event(start_event)
-
-            # 2. AI request
-            ai_event = create_ai_request_event(
-                event_type=EventType.AI_REQUEST_STARTED,
-                execution_id=scenario_id,
-                workflow_id=self.workflow_id,
-                ai_provider="huggingface",
-                ai_model="gpt2"
-            )
-
-            success2 = await event_producer.publish_event(ai_event)
-
-            # 3. Tool execution
-            tool_event = create_tool_call_event(
-                event_type=EventType.TOOL_CALL_STARTED,
-                execution_id=scenario_id,
-                workflow_id=self.workflow_id,
-                tool_name="calculator"
-            )
-
-            success3 = await event_producer.publish_event(tool_event)
-
-            # 4. Workflow completed
-            complete_event = create_execution_event(
-                event_type=EventType.EXECUTION_COMPLETED,
-                execution_id=scenario_id,
-                workflow_id=self.workflow_id,
-                execution_status="completed",
-                output_data={"result": "end-to-end test completed"}
-            )
-
-            success4 = await event_producer.publish_event(complete_event)
-
-            return all([success1, success2, success3, success4])
-
-        except Exception as e:
-            print(f"   End-to-end scenario error: {e}")
-            return False
-
-    def _print_test_summary(self, overall_success: bool):
-        """Print comprehensive test summary"""
-        print("\n" + "=" * 50)
-        print("📊 WEEK 3 TEST SUMMARY")
-        print("=" * 50)
-
-        passed = sum(1 for r in self.test_results.values() if r['status'] == 'passed')
-        failed = sum(1 for r in self.test_results.values() if r['status'] == 'failed')
-        errors = sum(1 for r in self.test_results.values() if r['status'] == 'error')
-        total = len(self.test_results)
-
-        print(f"✅ Passed: {passed}")
-        print(f"❌ Failed: {failed}")
-        print(f"⚠️  Errors: {errors}")
-        print(f"📊 Total:  {total}")
-        print()
-
-        # Detailed results
-        for test_name, result in self.test_results.items():
-            status = result['status']
-            duration = result.get('duration', 0)
-
-            if status == 'passed':
-                emoji = "✅"
-            elif status == 'failed':
-                emoji = "❌"
-            else:
-                emoji = "⚠️"
-
-            print(f"{emoji} {test_name.replace('test_', '').replace('_', ' ').title()}: {status} ({duration:.2f}s)")
-
-        print("\n" + "=" * 50)
-
-        if overall_success:
-            print("🎉 ALL TESTS PASSED - WEEK 3 SYSTEM IS READY!")
-        else:
-            print("❌ SOME TESTS FAILED - CHECK SYSTEM CONFIGURATION")
-
-        print("=" * 50)
-
-
-async def main():
-    """Run the complete test suite"""
-    test_suite = Week3IntegrationTest()
+async def test_enhanced_fastapi_service():
+    """Comprehensive test of the enhanced FastAPI service"""
+    print("🧪 Testing Enhanced FastAPI Workflow Service")
+    print("=" * 60)
 
     try:
-        results = await test_suite.run_all_tests()
-        return 0 if results['overall_success'] else 1
+        # Test 1: Service Health Checks
+        print("\n1. Testing Service Health Checks...")
+        await test_health_checks()
 
-    except KeyboardInterrupt:
-        print("\n🛑 Tests interrupted by user")
-        return 1
+        # Test 2: Redis Context Service
+        print("\n2. Testing Redis Context Service...")
+        await test_redis_context()
+
+        # Test 3: Kafka Message Service
+        print("\n3. Testing Kafka Message Service...")
+        await test_kafka_messaging()
+
+        # Test 4: Node Execution Engine
+        print("\n4. Testing Node Execution Engine...")
+        await test_node_execution()
+
+        # Test 5: AI Model Integration
+        print("\n5. Testing AI Model Integration...")
+        await test_ai_models()
+
+        # Test 6: Complete Workflow Simulation
+        print("\n6. Testing Complete Workflow Simulation...")
+        await test_complete_workflow()
+
+        print("\n✅ All integration tests completed successfully!")
+
     except Exception as e:
-        print(f"\n❌ Test suite error: {e}")
-        return 1
+        print(f"\n❌ Integration test failed: {e}")
+        raise
+
+
+async def test_health_checks():
+    """Test health check endpoints"""
+    try:
+        from app.services.context.redis_service import redis_context_service
+        from app.services.messaging.kafka_service import kafka_service
+
+        # Test Redis health
+        await redis_context_service.connect()
+        redis_health = await redis_context_service.health_check()
+        print(f"   Redis Health: {redis_health['status']}")
+
+        # Test Kafka health
+        await kafka_service.start()
+        kafka_health = await kafka_service.health_check()
+        print(f"   Kafka Health: {kafka_health['status']}")
+
+        print("   ✅ Health checks passed")
+
+    except Exception as e:
+        print(f"   ❌ Health check failed: {e}")
+        raise
+
+
+async def test_redis_context():
+    """Test Redis context operations"""
+    try:
+        from app.services.context.redis_service import redis_context_service
+
+        execution_id = str(uuid.uuid4())
+
+        # Test context operations
+        test_context = {
+            "workflow_id": str(uuid.uuid4()),
+            "status": "running",
+            "variables": {"test": True}
+        }
+
+        await redis_context_service.set_execution_context(execution_id, test_context)
+        retrieved_context = await redis_context_service.get_execution_context(execution_id)
+
+        assert retrieved_context == test_context
+        print("   ✅ Context storage/retrieval works")
+
+        # Test dependency tracking
+        dependencies = {"node1": 2, "node2": 1, "node3": 0}
+        await redis_context_service.set_dependencies(execution_id, dependencies)
+
+        ready_nodes = await redis_context_service.get_ready_nodes(execution_id)
+        assert "node3" in ready_nodes
+        print("   ✅ Dependency tracking works")
+
+        # Test node state management
+        await redis_context_service.mark_processing(execution_id, "node3")
+        processing_nodes = await redis_context_service.get_processing_nodes(execution_id)
+        assert "node3" in processing_nodes
+        print("   ✅ Node state management works")
+
+        # Cleanup
+        await redis_context_service.cleanup_execution(execution_id)
+        print("   ✅ Redis context tests passed")
+
+    except Exception as e:
+        print(f"   ❌ Redis context test failed: {e}")
+        raise
+
+
+async def test_kafka_messaging():
+    """Test Kafka messaging operations"""
+    try:
+        from app.services.messaging.kafka_service import (
+            kafka_service, NodeExecutionMessage, CompletionEvent
+        )
+
+        # Test message publishing
+        test_message = NodeExecutionMessage(
+            execution_id=str(uuid.uuid4()),
+            workflow_id=str(uuid.uuid4()),
+            node_id="test_node",
+            node_type="ai_decision",
+            node_data={
+                "prompt": "Is this a test?",
+                "options": ["yes", "no"]
+            },
+            context={"test": True},
+            dependencies=[],
+            timestamp=datetime.utcnow().isoformat()
+        )
+
+        await kafka_service.publish_node_execution(test_message)
+        print("   ✅ Node execution message published")
+
+        # Test completion event
+        completion_event = CompletionEvent(
+            execution_id=test_message.execution_id,
+            node_id=test_message.node_id,
+            status="completed",
+            result={"decision": "yes", "confidence": 0.9},
+            next_possible_nodes=["next_node"],
+            execution_time_ms=1500,
+            service="fastapi"
+        )
+
+        await kafka_service.publish_completion_event(completion_event)
+        print("   ✅ Completion event published")
+
+        # Test state update
+        await kafka_service.publish_state_update(
+            execution_id=test_message.execution_id,
+            status="node_completed",
+            data={"completed_node": test_message.node_id}
+        )
+        print("   ✅ State update published")
+
+        print("   ✅ Kafka messaging tests passed")
+
+    except Exception as e:
+        print(f"   ❌ Kafka messaging test failed: {e}")
+        raise
+
+
+async def test_node_execution():
+    """Test node execution engine"""
+    try:
+        from app.services.execution.node_engine import (
+            AIDecisionExecutor, AITextGeneratorExecutor, AIDataProcessorExecutor
+        )
+
+        execution_id = str(uuid.uuid4())
+
+        # Test AI Decision Executor
+        decision_executor = AIDecisionExecutor()
+        decision_result = await decision_executor.execute(
+            node_data={
+                "prompt": "Should we proceed?",
+                "options": ["yes", "no"],
+                "ai_config": {"provider": "huggingface", "temperature": 0.3}
+            },
+            context={"previous_step": "analysis_complete"},
+            execution_id=execution_id
+        )
+
+        assert "decision" in decision_result
+        print("   ✅ AI Decision Executor works")
+
+        # Test AI Text Generator Executor
+        text_executor = AITextGeneratorExecutor()
+        text_result = await text_executor.execute(
+            node_data={
+                "prompt_template": "Generate a summary about {topic}",
+                "ai_config": {"provider": "huggingface", "temperature": 0.7}
+            },
+            context={"topic": "artificial intelligence"},
+            execution_id=execution_id
+        )
+
+        assert "generated_text" in text_result
+        print("   ✅ AI Text Generator Executor works")
+
+        # Test AI Data Processor Executor
+        processor_executor = AIDataProcessorExecutor()
+        processor_result = await processor_executor.execute(
+            node_data={
+                "operation": "analyze",
+                "data_source": "context",
+                "ai_config": {"provider": "huggingface", "temperature": 0.5}
+            },
+            context={"data": {"sales": [100, 200, 150], "region": "north"}},
+            execution_id=execution_id
+        )
+
+        assert "processed_data" in processor_result
+        print("   ✅ AI Data Processor Executor works")
+
+        print("   ✅ Node execution tests passed")
+
+    except Exception as e:
+        print(f"   ❌ Node execution test failed: {e}")
+        raise
+
+
+async def test_ai_models():
+    """Test AI model integrations"""
+    try:
+        from app.services.ai.huggingface_service import hf_api
+        from app.services.ai.model_factory import model_factory
+
+        # Test HuggingFace API
+        test_prompt = "Hello, how are you?"
+
+        hf_result = await hf_api.generate_text(
+            model_name="microsoft/Phi-3-mini-4k-instruct",
+            prompt=test_prompt,
+            parameters={"max_tokens": 50, "temperature": 0.7}
+        )
+
+        assert "text" in hf_result
+        print("   ✅ HuggingFace API works")
+
+        # Test model factory
+        available_providers = model_factory.get_available_providers()
+        assert "huggingface" in available_providers
+        print(f"   ✅ Available providers: {available_providers}")
+
+        # Test popular models
+        popular_models = model_factory.get_popular_huggingface_models()
+        assert len(popular_models) > 0
+        print(f"   ✅ Popular models loaded: {len(popular_models)}")
+
+        print("   ✅ AI model tests passed")
+
+    except Exception as e:
+        print(f"   ❌ AI model test failed: {e}")
+        raise
+
+
+async def test_complete_workflow():
+    """Test complete workflow simulation"""
+    try:
+        from app.services.context.redis_service import redis_context_service
+        from app.services.messaging.kafka_service import kafka_service, NodeExecutionMessage
+        from app.services.execution.node_engine import node_execution_engine
+
+        execution_id = str(uuid.uuid4())
+        workflow_id = str(uuid.uuid4())
+
+        # Setup execution context
+        initial_context = {
+            "workflow_id": workflow_id,
+            "status": "running",
+            "input_data": {"query": "What is artificial intelligence?"},
+            "started_at": datetime.utcnow().isoformat()
+        }
+
+        await redis_context_service.set_execution_context(execution_id, initial_context)
+
+        # Setup dependencies (simulate Kahn's algorithm result)
+        dependencies = {
+            "analysis_node": 0,  # Ready to execute
+            "summary_node": 1,  # Depends on analysis_node
+            "output_node": 1  # Depends on summary_node
+        }
+
+        await redis_context_service.set_dependencies(execution_id, dependencies)
+
+        # Simulate node execution message from Spring Boot
+        ai_message = NodeExecutionMessage(
+            execution_id=execution_id,
+            workflow_id=workflow_id,
+            node_id="analysis_node",
+            node_type="ai_text_generator",
+            node_data={
+                "prompt_template": "Analyze this query: {query}",
+                "ai_config": {
+                    "provider": "huggingface",
+                    "model": "microsoft/Phi-3-mini-4k-instruct",
+                    "temperature": 0.7,
+                    "max_tokens": 200
+                }
+            },
+            context=initial_context,
+            dependencies=[],
+            timestamp=datetime.utcnow().isoformat()
+        )
+
+        # Process the message (simulate what happens when Kafka message is received)
+        await node_execution_engine.handle_execution_message(ai_message)
+
+        # Verify results
+        result = await redis_context_service.get_node_result(execution_id, "analysis_node")
+        assert result is not None
+        assert "generated_text" in result
+        print("   ✅ Node execution completed")
+
+        # Check that node was marked as completed
+        completed_nodes = await redis_context_service.get_completed_nodes(execution_id)
+        assert "analysis_node" in completed_nodes
+        print("   ✅ Node marked as completed")
+
+        # Cleanup
+        await redis_context_service.cleanup_execution(execution_id)
+        print("   ✅ Complete workflow simulation passed")
+
+    except Exception as e:
+        print(f"   ❌ Complete workflow test failed: {e}")
+        raise
+
+
+async def cleanup_test_services():
+    """Cleanup test services"""
+    try:
+        from app.services.context.redis_service import redis_context_service
+        from app.services.messaging.kafka_service import kafka_service
+        from app.services.execution.node_engine import node_execution_engine
+
+        await node_execution_engine.stop()
+        await kafka_service.stop()
+        await redis_context_service.disconnect()
+
+        print("✅ Test services cleaned up")
+
+    except Exception as e:
+        print(f"⚠️  Cleanup warning: {e}")
 
 
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    sys.exit(exit_code)
+    try:
+        asyncio.run(test_enhanced_fastapi_service())
+    except KeyboardInterrupt:
+        print("\n🛑 Tests interrupted by user")
+    except Exception as e:
+        print(f"\n💥 Test suite failed: {e}")
+        sys.exit(1)
+    finally:
+        try:
+            asyncio.run(cleanup_test_services())
+        except:
+            pass

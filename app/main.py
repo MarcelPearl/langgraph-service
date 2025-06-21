@@ -1,303 +1,267 @@
-from datetime import time
-
-from fastapi import FastAPI
-from contextlib import asynccontextmanager
-from app.core.database import init_database, close_database
-from app.core.config import settings
-from app.api.v1 import workflows, health, ai
-
-# Kafka integration
-from app.services.kafka.producer import event_producer
-from app.schemas.events import EventType, create_execution_event
-
+# app/main.py
+import asyncio
 import logging
+import sys
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
-# Configure logging
+from app.core.config import settings
+from app.api.v1 import health, ai
+
+# Import new services
+from app.services.messaging.kafka_service import kafka_service
+from app.services.context.redis_service import redis_context_service
+from app.services.execution.node_engine import node_execution_engine
+
+# Setup logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO if not settings.DEBUG else logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler('app.log') if settings.DEBUG else logging.NullHandler()
+    ]
 )
 
 logger = logging.getLogger(__name__)
 
+# Global background task for Kafka consumption
+kafka_consumer_task: asyncio.Task = None
+
+
+async def start_kafka_consumer():
+    """Start Kafka message consumption"""
+    global kafka_consumer_task
+    try:
+        kafka_consumer_task = asyncio.create_task(kafka_service.start_consuming())
+        logger.info("Kafka consumer started")
+    except Exception as e:
+        logger.error(f"Failed to start Kafka consumer: {e}")
+
+
+async def stop_kafka_consumer():
+    """Stop Kafka message consumption"""
+    global kafka_consumer_task
+    if kafka_consumer_task and not kafka_consumer_task.done():
+        kafka_consumer_task.cancel()
+        try:
+            await kafka_consumer_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("Kafka consumer stopped")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan manager with Kafka integration"""
-    logger.info("Application startup initiated")
+    """Application lifespan manager"""
+    logger.info("Starting FastAPI AI Engine...")
 
     try:
-        # Initialize database
-        await init_database()
-        logger.info("Database initialized")
+        # Connect to Redis
+        await redis_context_service.connect()
+        logger.info("✅ Redis connected")
 
-        # Start Kafka producer
-        await event_producer.start()
-        logger.info("Kafka producer started")
+        # Start Kafka service
+        await kafka_service.start()
+        logger.info("✅ Kafka service started")
 
-        # Publish application startup event
-        try:
-            startup_event = create_execution_event(
-                event_type=EventType.EXECUTION_STARTED,
-                execution_id="system-startup",
-                workflow_id="system",
-                execution_status="running",
-                metadata={
-                    "event": "application_startup",
-                    "version": "1.0.0",
-                    "environment": getattr(settings, 'ENVIRONMENT', 'development')
-                }
-            )
-            await event_producer.publish_event(startup_event)
-            logger.info("Application startup event published")
-        except Exception as e:
-            logger.warning(f"Failed to publish startup event: {e}")
+        # Start node execution engine
+        await node_execution_engine.start()
+        logger.info("✅ Node execution engine started")
 
-        logger.info("Application startup complete")
+        # Start Kafka consumer
+        await start_kafka_consumer()
+        logger.info("✅ Kafka consumer started")
+
+        logger.info("🚀 FastAPI AI Engine startup complete")
 
         yield
 
-        # Shutdown phase
-        logger.info("Application shutdown initiated")
-
-        # Publish application shutdown event
-        try:
-            shutdown_event = create_execution_event(
-                event_type=EventType.EXECUTION_COMPLETED,
-                execution_id="system-shutdown",
-                workflow_id="system",
-                execution_status="completed",
-                metadata={
-                    "event": "application_shutdown",
-                    "version": "1.0.0"
-                }
-            )
-            await event_producer.publish_event(shutdown_event)
-            logger.info("Application shutdown event published")
-        except Exception as e:
-            logger.warning(f"Failed to publish shutdown event: {e}")
-
-        # Stop Kafka producer
-        await event_producer.stop()
-        logger.info("Kafka producer stopped")
-
-        # Close database connections
-        await close_database()
-        logger.info("Database connections closed")
-
-        logger.info("Application shutdown complete")
-
     except Exception as e:
-        logger.error(f"Error during application lifecycle: {e}")
+        logger.error(f"❌ Startup failed: {e}")
         raise
 
+    finally:
+        # Cleanup on shutdown
+        logger.info("Shutting down FastAPI AI Engine...")
 
+        try:
+            # Stop Kafka consumer
+            await stop_kafka_consumer()
+
+            # Stop services
+            await node_execution_engine.stop()
+            await kafka_service.stop()
+            await redis_context_service.disconnect()
+
+            logger.info("✅ Application shutdown complete")
+
+        except Exception as e:
+            logger.error(f"❌ Shutdown error: {e}")
+
+
+# Create FastAPI application
 app = FastAPI(
-    title="MarcelPearl Workflow Automation Platform",
-    description="""
-    Advanced AI Workflow Automation Platform with Event-Driven Architecture
-
-    Features:
-    - AI-powered workflow execution using LangGraph
-    - Multi-provider AI model support (OpenAI, Anthropic, HuggingFace)
-    - Event-driven architecture with Kafka
-    - Real-time workflow monitoring and analytics
-    - Tool integration and custom AI agents
-    - Scalable execution engine with state persistence
-    """,
+    title="FastAPI AI Engine - Workflow Node Processor",
+    description="AI/ML node execution service for the dual-backend workflow system",
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/api/docs",
     redoc_url="/api/redoc"
 )
 
-
-# Add middleware for request/response logging and metrics
-@app.middleware("http")
-async def log_requests(request, call_next):
-    """Log requests and publish metrics events"""
-    import time
-    import uuid
-    from datetime import datetime
-
-    start_time = time.time()
-    request_id = str(uuid.uuid4())
-
-    # Add request ID to state
-    request.state.request_id = request_id
-
-    logger.info(
-        f"Request started: {request.method} {request.url.path} "
-        f"[{request_id}]"
-    )
-
-    response = await call_next(request)
-
-    # Calculate processing time
-    process_time = time.time() - start_time
-
-    # Add headers
-    response.headers["X-Request-ID"] = request_id
-    response.headers["X-Process-Time"] = str(process_time)
-
-    # Log response
-    logger.info(
-        f"Request completed: {request.method} {request.url.path} "
-        f"[{request_id}] {response.status_code} {process_time:.3f}s"
-    )
-
-    # Publish API metrics event (async, don't wait)
-    try:
-        if hasattr(event_producer, 'is_started') and event_producer.is_started:
-            from app.schemas.events import BaseEventPayload, EventType
-
-            metrics_event = BaseEventPayload(
-                event_type=EventType.EXECUTION_COMPLETED,  # Reusing for API metrics
-                metadata={
-                    "request_id": request_id,
-                    "method": request.method,
-                    "path": request.url.path,
-                    "status_code": response.status_code,
-                    "process_time_ms": int(process_time * 1000),
-                    "event_category": "api_metrics"
-                }
-            )
-
-            # Fire and forget
-            import asyncio
-            asyncio.create_task(event_producer.publish_event(metrics_event))
-
-    except Exception as e:
-        logger.warning(f"Failed to publish API metrics event: {e}")
-
-    return response
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
-# Health check enhancement with Kafka status
-@app.get("/api/v1/health/detailed")
-async def detailed_health_check():
-    """Detailed health check including Kafka connectivity"""
-    from app.core.database import get_db
-    from sqlalchemy import text
-
-    health_data = {
-        "status": "healthy",
-        "timestamp": time.time(),
-        "service": "workflow-automation",
-        "version": "1.0.0",
-        "checks": {}
-    }
-
-    # Database check
-    try:
-        async with get_db().__anext__() as db:
-            await db.execute(text("SELECT 1"))
-            health_data["checks"]["database"] = {"status": "healthy"}
-    except Exception as e:
-        health_data["checks"]["database"] = {"status": "unhealthy", "error": str(e)}
-        health_data["status"] = "unhealthy"
-
-    # Kafka producer check
-    try:
-        if event_producer.is_started:
-            health_data["checks"]["kafka_producer"] = {"status": "healthy", "connected": True}
-        else:
-            health_data["checks"]["kafka_producer"] = {"status": "unhealthy", "connected": False}
-            health_data["status"] = "degraded"
-    except Exception as e:
-        health_data["checks"]["kafka_producer"] = {"status": "unhealthy", "error": str(e)}
-        health_data["status"] = "unhealthy"
-
-    # AI services check
-    try:
-        from app.services.ai.model_factory import model_factory
-        providers = model_factory.get_available_providers()
-        health_data["checks"]["ai_providers"] = {
-            "status": "healthy" if providers else "degraded",
-            "available_providers": providers,
-            "count": len(providers)
+# Add global exception handler
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Global exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "Internal server error",
+            "error": str(exc) if settings.DEBUG else "An error occurred"
         }
-    except Exception as e:
-        health_data["checks"]["ai_providers"] = {"status": "unhealthy", "error": str(e)}
-
-    return health_data
+    )
 
 
 # Include routers
 app.include_router(health.router, prefix="/api/v1", tags=["health"])
-app.include_router(workflows.router, prefix="/api/v1/workflows", tags=["workflows"])
 app.include_router(ai.router, prefix="/api/v1", tags=["ai"])
 
-# Kafka monitoring routes
-from app.api.v1 import kafka_monitoring
+# Import and include execution router
+from app.api.v1.execution import router as execution_router
 
-app.include_router(kafka_monitoring.router, prefix="/api/v1", tags=["kafka-monitoring"])
-
-
-# Root endpoint
-@app.get("/")
-async def root():
-    """Root endpoint with service information"""
-    return {
-        "service": "MarcelPearl Workflow Automation Platform",
-        "version": "1.0.0",
-        "status": "operational",
-        "features": [
-            "AI-powered workflows",
-            "Event-driven architecture",
-            "Multi-provider AI support",
-            "Real-time monitoring",
-            "Tool integration"
-        ],
-        "documentation": "/api/docs",
-        "health_check": "/api/v1/health"
-    }
+app.include_router(execution_router, prefix="/api/v1", tags=["execution"])
 
 
-# Global exception handler with event publishing
-@app.exception_handler(Exception)
-async def global_exception_handler(request, exc):
-    """Global exception handler with error event publishing"""
-    import traceback
-    from fastapi.responses import JSONResponse
-
-    error_id = str(uuid.uuid4())
-
-    logger.error(
-        f"Unhandled exception [{error_id}]: {exc}\n"
-        f"Traceback: {traceback.format_exc()}"
-    )
-
-    # Publish error event
+# New service status endpoints
+@app.get("/api/v1/system/status")
+async def get_system_status():
+    """Get overall system status"""
     try:
-        if hasattr(event_producer, 'is_started') and event_producer.is_started:
-            from app.schemas.events import BaseEventPayload, EventType, EventSeverity
+        # Check all services
+        kafka_health = await kafka_service.health_check()
+        redis_health = await redis_context_service.health_check()
 
-            error_event = BaseEventPayload(
-                event_type=EventType.EXECUTION_FAILED,
-                severity=EventSeverity.ERROR,
-                metadata={
-                    "error_id": error_id,
-                    "error_type": type(exc).__name__,
-                    "error_message": str(exc),
-                    "path": request.url.path,
-                    "method": request.method,
-                    "event_category": "api_error"
-                }
+        overall_status = "healthy"
+        if any(service["status"] != "healthy" for service in [kafka_health, redis_health]):
+            overall_status = "degraded"
+
+        return {
+            "overall_status": overall_status,
+            "services": {
+                "kafka": kafka_health,
+                "redis": redis_health
+            },
+            "service_type": "fastapi_ai_engine",
+            "version": "1.0.0",
+            "node_types_supported": [
+                "ai_decision",
+                "ai_text_generator",
+                "ai_data_processor"
+            ]
+        }
+
+    except Exception as e:
+        logger.error(f"System status check failed: {e}")
+        return JSONResponse(
+            status_code=500,
+            content={
+                "overall_status": "unhealthy",
+                "error": str(e)
+            }
+        )
+
+
+@app.post("/api/v1/system/cleanup")
+async def cleanup_old_executions(older_than_hours: int = 48):
+    """Clean up old execution data"""
+    try:
+        await redis_context_service.cleanup_expired_executions(older_than_hours)
+        return {"message": f"Cleanup completed for executions older than {older_than_hours} hours"}
+    except Exception as e:
+        logger.error(f"Cleanup failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# Development and testing endpoints
+if settings.DEBUG:
+    @app.post("/api/v1/test/kafka")
+    async def test_kafka():
+        """Test Kafka connectivity"""
+        try:
+            from app.services.messaging.kafka_service import NodeExecutionMessage
+            import uuid
+
+            test_message = NodeExecutionMessage(
+                execution_id=str(uuid.uuid4()),
+                workflow_id=str(uuid.uuid4()),
+                node_id="test_node",
+                node_type="ai_decision",
+                node_data={"prompt": "Test prompt", "options": ["yes", "no"]},
+                context={"test": True},
+                dependencies=[],
+                timestamp=str(asyncio.get_event_loop().time())
             )
 
-            import asyncio
-            asyncio.create_task(event_producer.publish_event(error_event))
+            await kafka_service.publish_node_execution(test_message)
+            return {"message": "Kafka test message sent successfully"}
 
-    except Exception as publish_error:
-        logger.warning(f"Failed to publish error event: {publish_error}")
+        except Exception as e:
+            logger.error(f"Kafka test failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
 
-    return JSONResponse(
-        status_code=500,
-        content={
-            "error": "Internal Server Error",
-            "error_id": error_id,
-            "message": "An unexpected error occurred. Please contact support.",
-            "timestamp": datetime.utcnow().isoformat()
-        }
+
+    @app.post("/api/v1/test/redis")
+    async def test_redis():
+        """Test Redis connectivity"""
+        try:
+            test_data = {"test": True, "timestamp": str(asyncio.get_event_loop().time())}
+            await redis_context_service.set_execution_context("test_execution", test_data, ttl=60)
+
+            retrieved = await redis_context_service.get_execution_context("test_execution")
+
+            return {
+                "message": "Redis test successful",
+                "stored": test_data,
+                "retrieved": retrieved
+            }
+
+        except Exception as e:
+            logger.error(f"Redis test failed: {e}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+
+# Add startup event
+@app.on_event("startup")
+async def startup_event():
+    """Additional startup tasks"""
+    logger.info(f"FastAPI AI Engine starting with configuration:")
+    logger.info(f"- Debug mode: {settings.DEBUG}")
+    logger.info(f"- Redis URL: {settings.REDIS_URL}")
+    logger.info(f"- Kafka servers: {settings.KAFKA_BOOTSTRAP_SERVERS}")
+    logger.info(
+        f"- AI providers configured: {len([p for p in ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'HUGGINGFACE_API_KEY'] if getattr(settings, p, None)])}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "app.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=settings.DEBUG,
+        log_level="info" if not settings.DEBUG else "debug"
     )

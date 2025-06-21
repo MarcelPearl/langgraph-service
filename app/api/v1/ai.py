@@ -1,12 +1,6 @@
-from datetime import datetime
+# app/api/v1/ai.py
 from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
-from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.core.database import get_db
-from app.models.workflow import Workflow, WorkflowExecution
-from app.schemas.workflow import WorkflowResponse, WorkflowExecutionResponse, WorkflowExecutionCreate
+from fastapi import APIRouter, HTTPException
 from app.services.ai.model_factory import model_factory
 from app.services.ai.huggingface_service import hf_api
 from app.schemas.ai import (
@@ -122,10 +116,9 @@ async def test_free_models():
         test_prompt = "Hello, how are you today?"
 
         free_models = [
-            "gpt2",
-            "distilgpt2",
+            "microsoft/Phi-3-mini-4k-instruct",
             "microsoft/DialoGPT-medium",
-            "google/flan-t5-base"
+            "deepset/roberta-base-squad2"
         ]
 
         for model_name in free_models:
@@ -154,174 +147,48 @@ async def test_free_models():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# Workflow execution endpoints - these should probably be in a separate workflow execution router
-@router.post("/workflows/{workflow_id}/execute", response_model=WorkflowExecutionResponse)
-async def execute_workflow(
-        workflow_id: str,
-        execution_data: WorkflowExecutionCreate,
-        background_tasks: BackgroundTasks,
-        db: AsyncSession = Depends(get_db)
-):
-    """Execute a workflow with AI"""
+@router.get("/capabilities")
+async def get_ai_capabilities():
+    """Get AI engine capabilities and supported operations"""
     try:
-        # Get workflow
-        result = await db.execute(
-            select(Workflow).where(Workflow.id == workflow_id)
-        )
-        workflow = result.scalar_one_or_none()
+        from app.core.config import settings
 
-        if not workflow:
-            raise HTTPException(status_code=404, detail="Workflow not found")
-
-        # Create execution record
-        execution = WorkflowExecution(
-            workflow_id=workflow_id,
-            input_data=execution_data.input_data,
-            status="pending"
-        )
-
-        db.add(execution)
-        await db.commit()
-        await db.refresh(execution)
-
-        # Start background execution
-        background_tasks.add_task(
-            execute_workflow_background,
-            str(execution.id),
-            workflow_id,
-            execution_data.input_data,
-            workflow.ai_config,
-            db
-        )
-
-        logger.info(f"Started workflow execution: {execution.id}")
-        return execution
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        await db.rollback()
-        logger.error(f"Error starting workflow execution: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-async def execute_workflow_background(
-        execution_id: str,
-        workflow_id: str,
-        input_data: Dict[str, Any],
-        ai_config: Dict[str, Any],
-        db: AsyncSession
-):
-    """Background task for workflow execution"""
-    try:
-        # Import here to avoid circular imports
-        from app.services.langgraph.workflow import BasicWorkflowEngine
-
-        # Update execution status
-        await db.execute(
-            update(WorkflowExecution)
-            .where(WorkflowExecution.id == execution_id)
-            .values(status="running", started_at=datetime.utcnow())
-        )
-        await db.commit()
-
-        # Execute workflow
-        engine = BasicWorkflowEngine(db)
-        result = await engine.execute_workflow(
-            workflow_id=workflow_id,
-            execution_id=execution_id,
-            input_data=input_data,
-            ai_config=ai_config
-        )
-
-        # Update execution with results
-        update_data = {
-            "status": result["status"],
-            "completed_at": datetime.utcnow(),
-            "output_data": result.get("output"),
-            "error_data": result.get("error")
+        capabilities = {
+            "node_types": [
+                {
+                    "type": "ai_decision",
+                    "description": "AI-powered decision making with multiple options",
+                    "required_config": ["prompt", "options"]
+                },
+                {
+                    "type": "ai_text_generator",
+                    "description": "Generate text based on prompts and templates",
+                    "required_config": ["prompt_template"]
+                },
+                {
+                    "type": "ai_data_processor",
+                    "description": "Process and analyze data using AI",
+                    "required_config": ["operation"]
+                }
+            ],
+            "providers": model_factory.get_available_providers(),
+            "models": {
+                "huggingface": list(model_factory.get_popular_huggingface_models().keys()),
+                "openai": [settings.DEFAULT_OPENAI_MODEL] if getattr(settings, 'OPENAI_API_KEY', None) else [],
+                "anthropic": [settings.DEFAULT_ANTHROPIC_MODEL] if getattr(settings, 'ANTHROPIC_API_KEY', None) else []
+            },
+            "features": [
+                "Multi-provider AI support",
+                "Free model execution",
+                "Async node processing",
+                "Context-aware execution",
+                "Rate limiting",
+                "Error handling and retries"
+            ]
         }
 
-        if result.get("metadata"):
-            update_data.update({
-                "ai_tokens_used": result["metadata"].get("tokens_used", 0),
-                "steps_completed": result["metadata"].get("steps_completed", 0)
-            })
-
-        await db.execute(
-            update(WorkflowExecution)
-            .where(WorkflowExecution.id == execution_id)
-            .values(**update_data)
-        )
-        await db.commit()
-
-        logger.info(f"Workflow execution completed: {execution_id}")
+        return capabilities
 
     except Exception as e:
-        logger.error(f"Background execution failed for {execution_id}: {e}")
-
-        # Update execution with error
-        await db.execute(
-            update(WorkflowExecution)
-            .where(WorkflowExecution.id == execution_id)
-            .values(
-                status="failed",
-                completed_at=datetime.utcnow(),
-                error_data={
-                    "type": type(e).__name__,
-                    "message": str(e),
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            )
-        )
-        await db.commit()
-
-
-@router.get("/workflows/{workflow_id}/executions", response_model=List[WorkflowExecutionResponse])
-async def list_workflow_executions(
-        workflow_id: str,
-        skip: int = 0,
-        limit: int = 100,
-        db: AsyncSession = Depends(get_db)
-):
-    """List workflow executions"""
-    try:
-        result = await db.execute(
-            select(WorkflowExecution)
-            .where(WorkflowExecution.workflow_id == workflow_id)
-            .offset(skip)
-            .limit(limit)
-            .order_by(WorkflowExecution.created_at.desc())
-        )
-        executions = result.scalars().all()
-        return executions
-
-    except Exception as e:
-        logger.error(f"Error listing executions: {e}")
+        logger.error(f"Error getting capabilities: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/executions/{execution_id}", response_model=WorkflowExecutionResponse)
-async def get_execution(
-        execution_id: str,
-        db: AsyncSession = Depends(get_db)
-):
-    """Get execution by ID"""
-    try:
-        result = await db.execute(
-            select(WorkflowExecution)
-            .where(WorkflowExecution.id == execution_id)
-        )
-        execution = result.scalar_one_or_none()
-
-        if not execution:
-            raise HTTPException(status_code=404, detail="Execution not found")
-
-        return execution
-
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting execution: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
