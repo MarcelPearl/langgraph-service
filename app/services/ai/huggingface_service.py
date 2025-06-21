@@ -4,7 +4,7 @@ import time
 import logging
 from typing import Dict, Any, Optional, List
 from app.core.config import settings
-
+from app.services.ai.rate_limiter import provider_rate_limiter
 logger = logging.getLogger(__name__)
 
 
@@ -16,6 +16,7 @@ class HuggingFaceAPI:
         self.last_request_time = 0
         self.min_delay = 2.0  # Rate limiting for free tier
 
+        self.rate_limiter = provider_rate_limiter.get_limiter("huggingface")
         # Model-specific configurations
         self.model_configs = {
             "deepseek/deepseek-v3-0324": {

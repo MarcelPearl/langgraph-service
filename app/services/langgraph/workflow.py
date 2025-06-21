@@ -1,6 +1,5 @@
 from typing import Dict, Any, List, Optional, Callable
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langchain_core.messages import HumanMessage, AIMessage, ToolMessage
 from app.services.langgraph.state import WorkflowState, StateManager
 from app.services.ai.model_factory import model_factory
@@ -12,7 +11,7 @@ import json
 from datetime import datetime
 
 # Kafka integration
-from app.services.kafka.producer import event_producer
+from app.services.kafka.producer import get_event_producer
 from app.schemas.events import (
     EventType, create_execution_event, create_node_event,
     create_ai_request_event, create_tool_call_event
@@ -24,21 +23,16 @@ logger = logging.getLogger(__name__)
 class BasicWorkflowEngine:
     """Basic workflow execution engine using LangGraph with Kafka event integration"""
 
-    def __init__(self, db_session):
+    def __init__(self, db_session=None):
         self.db_session = db_session
         self.state_manager = StateManager(db_session)
+        # Remove PostgreSQL checkpointer - use in-memory for now
         self.checkpointer = None
-        self._setup_checkpointer()
 
     def _setup_checkpointer(self):
-        """Setup PostgreSQL checkpointer for state persistence"""
-        try:
-            self.checkpointer = AsyncPostgresSaver.from_conn_string(
-                settings.LANGGRAPH_CHECKPOINT_DB
-            )
-        except Exception as e:
-            logger.error(f"Failed to setup checkpointer: {e}")
-            self.checkpointer = None
+        """Setup in-memory checkpointer"""
+
+        self.checkpointer = None
 
     async def create_basic_workflow(self) -> StateGraph:
         """Create a basic AI workflow graph"""
