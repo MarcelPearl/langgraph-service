@@ -1,4 +1,3 @@
-# app/api/v1/ai.py
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException
 from app.services.ai.model_factory import model_factory
@@ -117,7 +116,6 @@ async def test_free_models():
 
         free_models = [
             "microsoft/Phi-3-mini-4k-instruct",
-            "microsoft/DialoGPT-medium",
             "deepset/roberta-base-squad2"
         ]
 

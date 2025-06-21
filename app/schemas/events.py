@@ -7,29 +7,25 @@ import uuid
 
 class EventType(str, Enum):
     """Types of events in the workflow system"""
-    # Execution events
+
     EXECUTION_STARTED = "execution_started"
     EXECUTION_COMPLETED = "execution_completed"
     EXECUTION_FAILED = "execution_failed"
     EXECUTION_CANCELLED = "execution_cancelled"
 
-    # Node events
     NODE_STARTED = "node_started"
     NODE_COMPLETED = "node_completed"
     NODE_FAILED = "node_failed"
     NODE_RETRY = "node_retry"
 
-    # AI events
     AI_REQUEST_STARTED = "ai_request_started"
     AI_REQUEST_COMPLETED = "ai_request_completed"
     AI_REQUEST_FAILED = "ai_request_failed"
 
-    # Tool events
     TOOL_CALL_STARTED = "tool_call_started"
     TOOL_CALL_COMPLETED = "tool_call_completed"
     TOOL_CALL_FAILED = "tool_call_failed"
 
-    # System events
     SYSTEM_ERROR = "system_error"
     SYSTEM_WARNING = "system_warning"
 
@@ -88,7 +84,6 @@ class ToolCallEvent(BaseEvent):
     error_data: Optional[Dict[str, Any]] = None
 
 
-# Event creation helper functions
 def create_execution_event(
         event_type: EventType,
         execution_id: str,

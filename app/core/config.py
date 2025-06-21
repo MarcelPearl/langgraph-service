@@ -1,21 +1,18 @@
-# app/core/config.py
 from pydantic_settings import BaseSettings
 from typing import Optional, List
 
 
 class Settings(BaseSettings):
-    # Application Settings
+   
     APP_NAME: str = "AI Workflow Automation - FastAPI Engine"
     DEBUG: bool = False
     API_VERSION: str = "v1"
 
-    # Redis Configuration (for context sharing)
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_MAX_CONNECTIONS: int = 20
     REDIS_SOCKET_TIMEOUT: int = 30
     REDIS_SOCKET_CONNECT_TIMEOUT: int = 30
 
-    # Kafka Configuration (for inter-service messaging)
     KAFKA_BOOTSTRAP_SERVERS: str = "localhost:9092"
     KAFKA_GROUP_ID: str = "fastapi-ai-workers"
     KAFKA_AUTO_OFFSET_RESET: str = "latest"
@@ -25,47 +22,38 @@ class Settings(BaseSettings):
     KAFKA_RETRY_BACKOFF_MS: int = 1000
     KAFKA_MAX_REQUEST_SIZE: int = 1048576  # 1MB
 
-    # Kafka Topics (should match Spring Boot configuration)
     KAFKA_TOPIC_COORDINATION: str = "workflow-coordination"
     KAFKA_TOPIC_FASTAPI_QUEUE: str = "fastapi-execution-queue"
     KAFKA_TOPIC_SPRING_QUEUE: str = "spring-execution-queue"
     KAFKA_TOPIC_COMPLETION: str = "node-completion-events"
     KAFKA_TOPIC_STATE_UPDATES: str = "workflow-state-updates"
 
-    # Security
     SECRET_KEY: str = "my-super-secret-jwt-key-1234567890"
 
-    # AI Provider API Keys
     OPENAI_API_KEY: Optional[str] = None
     ANTHROPIC_API_KEY: Optional[str] = None
     HUGGINGFACE_API_KEY: Optional[str] = None
 
-    # AI Model Defaults
     DEFAULT_OPENAI_MODEL: str = "gpt-4"
     DEFAULT_ANTHROPIC_MODEL: str = "claude-3-5-sonnet-20241022"
     DEFAULT_HUGGINGFACE_MODEL: str = "microsoft/Phi-3-mini-4k-instruct"
 
-    # HuggingFace Configuration
     HUGGINGFACE_INFERENCE_URL: str = "https://api-inference.huggingface.co/models"
     HUGGINGFACE_FREE_TIER_DELAY: float = 2.0
     HUGGINGFACE_MAX_NEW_TOKENS: int = 1000
 
-    # AI Request Configuration
     AI_REQUEST_TIMEOUT: int = 120
     AI_MAX_RETRIES: int = 3
     AI_RETRY_DELAY: float = 1.0
 
-    # Workflow Execution Limits
-    WORKFLOW_MAX_EXECUTION_TIME: int = 3600  # 1 hour
+    WORKFLOW_MAX_EXECUTION_TIME: int = 3600  
     MAX_WORKFLOW_STEPS: int = 100
-    NODE_EXECUTION_TIMEOUT: int = 300  # 5 minutes
+    NODE_EXECUTION_TIMEOUT: int = 300 
 
-    # Rate Limiting
     AI_CALLS_PER_MINUTE: int = 60
     AI_CALLS_PER_HOUR: int = 1000
     NODE_CONCURRENT_LIMIT: int = 10
 
-    # Local Model Configuration
     LOCAL_MODEL_CACHE_DIR: str = "./models"
     USE_LOCAL_MODELS: bool = True
     PREFERRED_LOCAL_MODELS: List[str] = [
@@ -73,44 +61,37 @@ class Settings(BaseSettings):
         "deepset/roberta-base-squad2"
     ]
 
-    # Context and State Management
-    EXECUTION_CONTEXT_TTL: int = 86400  # 24 hours
-    RESULT_CACHE_TTL: int = 43200  # 12 hours
+    EXECUTION_CONTEXT_TTL: int = 86400 
+    RESULT_CACHE_TTL: int = 43200 
     CLEANUP_INTERVAL_HOURS: int = 24
 
-    # Node Execution Configuration
     NODE_RETRY_ATTEMPTS: int = 3
     NODE_RETRY_DELAY: float = 5.0
     NODE_TIMEOUT_SECONDS: int = 300
 
-    # Monitoring and Observability
     ENABLE_METRICS: bool = True
     METRICS_PORT: int = 9090
     LOG_LEVEL: str = "INFO"
     ENABLE_DISTRIBUTED_TRACING: bool = False
     JAEGER_ENDPOINT: Optional[str] = None
 
-    # Performance Configuration
     MAX_CONCURRENT_EXECUTIONS: int = 100
     THREAD_POOL_SIZE: int = 20
     ASYNC_TIMEOUT: int = 30
 
-    # Error Handling
     ENABLE_ERROR_DETAILS: bool = True
     ERROR_NOTIFICATION_WEBHOOK: Optional[str] = None
 
-    # Service Discovery (for production)
+
     SERVICE_REGISTRY_URL: Optional[str] = None
     CONSUL_HOST: Optional[str] = None
     CONSUL_PORT: int = 8500
 
-    # Environment-specific overrides
-    ENVIRONMENT: str = "development"  # development, staging, production
+    ENVIRONMENT: str = "development"  
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        # Adjust settings based on environment
         if self.ENVIRONMENT == "production":
             self.DEBUG = False
             self.LOG_LEVEL = "WARNING"
